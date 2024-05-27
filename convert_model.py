@@ -6,7 +6,7 @@ from fancy_einsum import einsum
 from tqdm.notebook import tqdm
 import transformer_lens
 from transformer_lens.HookedTransformer import HookedTransformer, HookedTransformerConfig
-
+from huggingface_hub import HfFolder
 
 def convert_neox_weights(neox, cfg: HookedTransformerConfig):
     state_dict = {}
