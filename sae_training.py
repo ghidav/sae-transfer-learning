@@ -25,7 +25,7 @@ l1_warm_up_steps = total_training_steps // 20  # 5% of training
 for i in range(2, 6):
     cfg = LanguageModelSAERunnerConfig(
         # Data Generating Function (Model + Training Distibuion)
-        model_name="marco-molinari_pythia-70m-instruct",  # our model (more options here: https://neelnanda-io.github.io/TransformerLens/generated/model_properties_table.html)
+        model_name="EleutherAI_pythia-70m-deduped",  # our model (more options here: https://neelnanda-io.github.io/TransformerLens/generated/model_properties_table.html)
         hook_point=f"blocks.{i}.hook_resid_pre",  # A valid hook point (see more details here: https://neelnanda-io.github.io/TransformerLens/generated/demos/Main_Demo.html#Hook-Points)
         hook_point_layer=i,  # Only one layer in the model.
         d_in=512,  # the width of the mlp output.
@@ -70,9 +70,9 @@ for i in range(2, 6):
         eval_every_n_wandb_logs=20,
         # Misc
         device=device,
-        seed=42,
+        seed=55,
         n_checkpoints=1,
-        checkpoint_path="sae-transfer-learning/checkpoints",
+        checkpoint_path="sae-transfer-learning/checkpoints-first-base-run",
         dtype=torch.float32,
     )
     

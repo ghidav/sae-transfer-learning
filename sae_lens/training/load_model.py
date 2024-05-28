@@ -24,6 +24,10 @@ def load_model(
         base_model = HookedTransformer.from_pretrained("EleutherAI/pythia-70m-deduped")
         pythia_cfg = base_model.cfg
         return convert_model(fine_tuned_model, pythia_cfg).to(device)
+    if model_name == 'EleutherAI_pythia-70m-deduped':
+        return HookedTransformer.from_pretrained(
+            model_name='EleutherAI/pythia-70m-deduped', device=device, **model_from_pretrained_kwargs
+        )
     if model_class_name == "HookedTransformer":
         return HookedTransformer.from_pretrained(
             model_name=model_name, device=device, **model_from_pretrained_kwargs
