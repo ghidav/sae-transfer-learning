@@ -16,9 +16,17 @@
         {
             "name": "S2",
             "values": ["John", "Mary", "Paul", "Anna", "Mark", "Lucy", "David", "Emma", "James", "Sara", "Lisa", "Brian", "Eric", "Jane", "Peter", "Susan", "Chris", "Nina", "Helen", "Diane", "Alice", "Bruce", "Kevin", "Linda", "Laura", "Megan", "Ryan", "Julie", "Steve", "Aaron", "Molly", "Cindys"]
+        },
+        {
+            "name": "Pos",
+            "values": ["ABB", "BAB"]
+        },
+        {
+            "name": "END",
+            "values": [null, null]
         }
     ],
-    "components": [
+    "nodes": [
         {
             "name": "PTH",
             "heads": ["2.2", "4.11"],
@@ -57,7 +65,7 @@
         },
         {
             "name": "bNMH",
-            "heads": ["0.1", "3.0", "0.10"],
+            "heads": ["9.0", "9.7", "10.1", "10.2", "10.6", "10.10", "11.2", "11.9"],
             "q": "{END}",
             "kv": "{IO}"
         }

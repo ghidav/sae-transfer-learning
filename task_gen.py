@@ -17,12 +17,24 @@ with open(f'tasks/{args.task.lower()}/cfg.json', 'r') as f:
     base_cfg = json.load(f)
 
 # IOI
-if args.tasks == 'ioi':
+if args.task == 'ioi':
     names = base_cfg['variables'][0]['values']
     names_tokens = [tokenizer(' '+n, return_tensors='pt')['input_ids'][0] for n in names]
     names = [n for n, t in zip(names, names_tokens) if len(t) == 1]
     
     templates = base_cfg['templates']
+    
+    for i, var in enumerate(base_cfg['variables']):
+        if var['name'] == 'IO':
+            base_cfg['variables'][i]['position'] = [2, 4]
+        elif var['name'] == 'S1':
+            base_cfg['variables'][i]['position'] = [4, 2]
+        elif var['name'] == 'S2':
+            base_cfg['variables'][i]['position'] = [10, 10]
+        elif var['name'] == 'END':
+            base_cfg['variables'][i]['position'] = [-1, -1]
+        else:
+            base_cfg['variables'][i]['position'] = [None, None]
 
     prompts = []
     for i in range(len(names)):
@@ -34,30 +46,20 @@ if args.tasks == 'ioi':
                 else:
                     ioi_template = templates[1] # BAB
                 
-                io, s1 = names[i], names[j]
-                prompt = ioi_template.format(IO=io, S1=s1)
-                tokens = tokenizer(prompt, return_tensors='pt')['input_ids'][0]
-                str_tokens = tokenizer.convert_ids_to_tokens(tokens)
-                    
+                io, s = names[i], names[j]
+                clean_prompt = ioi_template.format(IO=io, S1=s, S2=s)
+                corr_prompt = ioi_template.format(IO=io, S1=s, S2=io)
+                
                 prompts.append({
-                    "prompt": prompt,
-                    "variables": [
-                        {
-                            "name": "IO",
-                            "value": names[i],
-                            "pos": 2 if pos > 0.5 else 4
-                        },
-                        {
-                            "name": "S1",
-                            "value": names[j],
-                            "pos": 4 if pos > 0.5 else 2
-                        },
-                        {
-                            "name": "S2",
-                            "value": names[j],
-                            "pos": 10
+                    "clean_prompt": clean_prompt,
+                    "corr_prompt": corr_prompt,
+                    "variables": {
+                        "IO": names[i],
+                        "S1": names[j],
+                        "S2": names[j],
+                        "Pos": "ABB" if pos > 0.5 else "BAB"
                         }
-                ]})
+                    })
 
     base_cfg['prompts'] = prompts
     # Write updated config
