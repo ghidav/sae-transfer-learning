@@ -47,12 +47,10 @@ if args.task == 'ioi':
                     ioi_template = templates[1] # BAB
                 
                 io, s = names[i], names[j]
-                clean_prompt = ioi_template.format(IO=io, S1=s, S2=s)
-                corr_prompt = ioi_template.format(IO=io, S1=s, S2=io)
+                prompt = ioi_template.format(IO=io, S1=s, S2=s)
                 
                 prompts.append({
-                    "clean_prompt": clean_prompt,
-                    "corr_prompt": corr_prompt,
+                    "prompt": prompt,
                     "variables": {
                         "IO": names[i],
                         "S1": names[j],
