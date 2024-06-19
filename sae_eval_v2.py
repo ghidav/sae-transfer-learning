@@ -178,14 +178,22 @@ device = "cuda"
 model: HookedSAETransformer = HookedSAETransformer.from_pretrained("gpt2").to(device)
 model.eval()
 
-hook_name_to_sae = {}
+hook_z_sae = {}
+hook_resid_pre_sae = {}
 for layer in tqdm(range(12)):
     sae, cfg_dict, _ = SAE.from_pretrained(
         "gpt2-small-hook-z-kk",
         f"blocks.{layer}.hook_z",
-        device=device,
+        device=device
     )
-    hook_name_to_sae[sae.cfg.hook_name] = sae
+    hook_z_sae[sae.cfg.hook_name] = sae
+
+    sae, cfg_dict, _ = SAE.from_pretrained(
+        "gpt2-small-res-jb",
+        f"blocks.{layer}.hook_resid_pre",
+        device=device
+    )
+    hook_resid_pre_sae[sae.cfg.hook_name] = sae
 
 # Load task
 with open('tasks/ioi/task.json') as f:
@@ -194,7 +202,7 @@ with open('tasks/ioi/task.json') as f:
 ioi_circuit = IOICircuit(model, task)
 idx = 0
 
-node_names = ['NMH.z', 'bNMH.z']
+node_names = ['NMH.k'] #, 'NMH.q', 'bNMH.k']
 attribute = 'IO'
 
 example = task['prompts'][idx]
@@ -225,7 +233,20 @@ corr_prompt = clean_prompt.replace(' '+io, new_io)
 clean_tokens = model.to_tokens(clean_prompt)
 corr_tokens = model.to_tokens(corr_prompt)
 
+with torch.no_grad():
+    clean_logits = model(clean_tokens)
+
 # Hooking the model for patching
+def feature_z_patching_hook(x, hook, pos, f_in):
+    x[:, pos] = x[:, pos] + f_in[None]
+    return x
+
+def feature_qkv_patching_hook(x, hook, pos, head, edit):
+    x[:, pos, head] = edit
+    return x
+
+N = 100
+
 hooks = []
 
 for name in node_names:
@@ -236,6 +257,9 @@ for name in node_names:
 
     # Add hooks to selected component of the node
     for component_name in components:
+        
+        z_vectors = [[] for l in range(model.cfg.n_layers)]
+        
         if component_name in ['q', 'z']:
             # Read the variable name and offset (e.g. IH.q -> S2+0 | PTH.z -> S1+1)
             var, offset = ioi_circuit.read_variable(node['q'])
@@ -250,64 +274,86 @@ for name in node_names:
             l, h = head.split('.')
             l, h = int(l), int(h)
             print(f"Hooking L{l}H{h} {component_name} at position {var_pos}")
-            hook_name = utils.get_act_name(component_name, l)
-
-            sae = hook_name_to_sae[hook_name]
-
+            
             with torch.no_grad():
                 _, clean_cache = model.run_with_cache(clean_tokens)
                 _, corr_cache = model.run_with_cache(corr_tokens)
 
-            clean_acts = torch.matmul(clean_cache[hook_name][:, var_pos, h], model.W_O[l, h])
-            corr_acts = torch.matmul(corr_cache[hook_name][:, var_pos, h], model.W_O[l, h])
+            if component_name == "z":
+                hook_name = utils.get_act_name(component_name, l)
+                sae = hook_z_sae[hook_name]
+                clean_acts = torch.matmul(clean_cache[hook_name][:, var_pos, h], model.W_O[l, h]).detach()
+                corr_acts = torch.matmul(corr_cache[hook_name][:, var_pos, h], model.W_O[l, h]).detach()
+            else:
+                hook_name = utils.get_act_name('resid_pre', l)
+                sae = hook_resid_pre_sae[hook_name]
+                clean_acts = clean_cache[hook_name][:, var_pos]
+                corr_acts = corr_cache[hook_name][:, var_pos]
             
-            with torch.no_grad():
-                _, sae_cache = sae.run_with_cache(clean_acts)
+            #with torch.no_grad():
+            #    _, sae_cache = sae.run_with_cache(clean_acts)
+            #sae_acts = sae_cache['hook_sae_acts_post'][None]
 
-            sae_acts = sae_cache['hook_sae_acts_post'][None]
+            W_dec = sae.W_dec.clone().detach()
 
+            # Initialize influence vectors as leaf nodes
+            f_in = torch.ones(W_dec.shape[0], device=W_dec.device, dtype=torch.float) / W_dec.shape[0]
+            f_in.requires_grad = True
 
-W_dec = sae.W_dec.clone().detach().float()
-clean_acts = clean_acts.detach().float()
-corr_acts = corr_acts.detach().float()
+            transformed_acts = clean_acts + torch.matmul(f_in, W_dec)
+            loss = torch.norm(transformed_acts - corr_acts)
+            loss.backward()
 
-# Initialize influence vectors as leaf nodes
-f_in = torch.ones(W_dec.shape[0], device=W_dec.device, dtype=torch.float) / W_dec.shape[0]
-f_in.requires_grad = True
+            gradient_importance = f_in.grad.abs()
+            best_features_ids = torch.argsort(gradient_importance, descending=True)[:N]
+            best_features = W_dec[best_features_ids] # N x dm
 
-transformed_acts = clean_acts + torch.matmul(f_in, W_dec)
-loss = torch.norm(transformed_acts - corr_acts)
-loss.backward()
+            # Initialize alpha coefficients for the top 10 features
+            alphas = torch.randn(N, device=W_dec.device, dtype=torch.float) / N
+            alphas.requires_grad = True
+            optimizer = torch.optim.SGD([alphas], lr=0.02)
 
-N = 5
-gradient_importance = f_in.grad.abs()
-best_features_ids = torch.argsort(gradient_importance, descending=True)[:N]
-best_features = W_dec[best_features_ids] # N x dm
+            # Optimization loop
+            for i in range(500):
+                optimizer.zero_grad()
 
-# Initialize alpha coefficients for the top 10 features
-alphas = torch.randn(N, device=W_dec.device, dtype=torch.float) / N
-alphas.requires_grad = True
+                transformed_acts = clean_acts + torch.matmul(alphas, best_features)
+                
+                loss = torch.norm(transformed_acts - corr_acts)
+                loss.backward()
+                optimizer.step()
 
-# Optimizer setup for alphas
-optimizer = torch.optim.SGD([alphas], lr=0.01)
+            optimized_alphas = alphas.detach()
 
-# Optimization loop
-for i in range(1000):  # Example: 100 iterations
-    optimizer.zero_grad()
-
-    # Compute the transformed activations using only the top 10 features
-    transformed_acts = clean_acts + torch.matmul(alphas, best_features)
+            if component_name == "z":
+                z_vectors[l].append(torch.matmul(optimized_alphas, best_features))
+            else:
+                hook_name = utils.get_act_name(component_name, l)
+                rs_pre = clean_cache[utils.get_act_name('resid_pre', l)][:, var_pos]
+                if component_name == "q":
+                    M = model.W_Q[l, h]
+                elif component_name == "k":
+                    M = model.W_K[l, h]
+                elif component_name == "v":
+                    M = model.W_V[l, h]
+                edit = torch.matmul(rs_pre + torch.matmul(optimized_alphas, best_features)[None], M)
+                hook_fn = partial(feature_qkv_patching_hook, pos=var_pos, head=h, edit=edit)
+                hooks.append((hook_name, hook_fn))
     
-    loss = torch.norm(transformed_acts - corr_acts)
-    loss.backward()
-    optimizer.step()
+    # Add z hooks
+    var, offset = ioi_circuit.read_variable(node['q'])
+    var_pos = ioi_circuit.get_variable(var)['position'][pos_id] + offset
+    
+    for l in range(model.cfg.n_layers):
+        if len(z_vectors[l]) > 0:
+            z_vectors[l] = torch.stack(z_vectors[l], dim=0).sum(dim=0)
+        
+            hook_name = utils.get_act_name('attn_out', l)
+            hook_fn = partial(feature_z_patching_hook, pos=var_pos, f_in=z_vectors[l])
+            hooks.append((hook_name, hook_fn))
 
-    if i % 50 == 0:
-        print(f"Iteration {i}, Loss: {loss.item()}")
+with torch.no_grad():
+    patched_logits = model.run_with_hooks(clean_tokens, fwd_hooks=hooks)
 
-# Detach the optimized alphas from the graph
-optimized_alphas = alphas.detach()
-
-print("Optimized alphas for the top 10 features:", optimized_alphas)
-print("Initial loss:", torch.norm(clean_acts - corr_acts).item())
-print("Final loss:", torch.norm(clean_acts + torch.matmul(optimized_alphas, best_features) - corr_acts).item())
+print("\nClean logit diff: ", np.round(logits_diff(clean_logits, ' '+io, new_io).item(), 2))
+print("Patched logit diff: ", np.round(logits_diff(patched_logits, ' '+io, new_io).item(), 2))
