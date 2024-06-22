@@ -74,10 +74,6 @@ all_nodes_labels = ['bNMH-z', 'bNMH-q', 'bNMH-qk', 'IH+DTH-q', 'SIH-q', 'SIH-v',
 all_nodes = [['bNMH.z'], ['bNMH.q'], ['bNMH.qk'], ['IH.q', 'DTH.q'], ['SIH.q'], ['SIH.v'], ['bNMH.z'], ['bNMH.q'], ['bNMH.qk'], ['IH.q', 'DTH.q'], ['SIH.q'], ['SIH.v']]
 attributes = ['IO', 'S', 'S', 'S', 'S', 'S', 'Pos', 'Pos', 'Pos', 'Pos', 'Pos']
 
-all_nodes_labels = ['bNMH-q', 'bNMH-qk', 'IH+DTH-q', 'SIH-q', 'SIH-v']
-all_nodes = [['bNMH.q'], ['bNMH.qk'], ['IH.q', 'DTH.q'], ['SIH.q'], ['SIH.v']]
-attributes = ['Pos', 'Pos', 'Pos', 'Pos', 'Pos']
-
 for node_names, node_label, attribute in zip(all_nodes, all_nodes_labels, attributes):
     scores_df = {
         'clean_ld': [],
