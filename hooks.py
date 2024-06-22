@@ -5,7 +5,10 @@ def zero_abl_hook(x, hook, pos, head):
     return x
 
 def patching_hook(x, hook, pos, head, corr):
-    x[:, pos, head] = corr[:, pos, head]
+    if head is None:
+        x[:, pos] = corr[:, pos]
+    else:
+        x[:, pos, head] = corr[:, pos, head]
     return x
 
 def feature_patching_hook(x, hook, pos, head, f_in, f_out):

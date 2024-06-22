@@ -7,6 +7,7 @@ import pandas as pd
 from transformer_lens import utils
 from sae_lens import SAE
 from tqdm import tqdm
+from typing import Dict, List, Optional, Tuple, Union
 from hooks import zero_abl_hook, patching_hook, feature_patching_hook, feature_qkv_patching_hook, feature_z_patching_hook
 
 class TransformerCircuit:
@@ -91,7 +92,7 @@ class IOICircuit(TransformerCircuit):
             task_df['S2_pos'].append(s2_pos)
 
         return pd.DataFrame(task_df)
-
+    """
     def run_with_patch(
             self, 
             prompt: dict, 
@@ -115,7 +116,7 @@ class IOICircuit(TransformerCircuit):
         Returns the difference of answer logits between the clean and patched prompt.
         '''
         # Checks
-        assert method in ['zero', 'corr', 'feature', 'sae'], "Method must be either 'zero', 'corr', 'feature'"
+        assert method in ['zero', 'corr', 'feature', 'sae-fs', 'sae-all'], "Method must be either 'zero', 'corr', 'feature'"
         assert attribute in ['IO', 'S', 'Pos'], "Attribute must be either 'IO', 'S', 'Pos'"
         for node_name in node_names:
             node, components = node_name.split('.')
@@ -131,9 +132,10 @@ class IOICircuit(TransformerCircuit):
 
         clean_prompt = prompt['prompt']
         clean_tokens = self.model.to_tokens(clean_prompt)
+        corr_logits = None
         if verbose: print(f"Clean prompt: {clean_prompt}")
 
-        if method in ['corr', 'sae']:
+        if method in ['corr', 'sae-fs', 'sae-all']:
             # Creation of the corrupted prompt based on the attribute
             if attribute == 'IO':
                 # Pick a random new name to put in IO
@@ -154,7 +156,7 @@ class IOICircuit(TransformerCircuit):
             if verbose: print(f"Corrupted prompt: {corr_prompt}")
             
             with torch.no_grad():
-                _, corr_cache = self.model.run_with_cache(corr_tokens)
+                corr_logits, corr_cache = self.model.run_with_cache(corr_tokens)
 
         with torch.no_grad():
             clean_logits, clean_cache = self.model.run_with_cache(clean_tokens)
@@ -193,7 +195,7 @@ class IOICircuit(TransformerCircuit):
                         f_in = patches[i][0][component_name][l]
                         f_out = patches[i][1][component_name][l]
                         hook_fn = partial(feature_patching_hook, pos=var_pos, head=h, f_in=f_in, f_out=f_out)
-                    elif method == 'sae':
+                    elif 'sae' in method:
                         if component_name == "z":
                             sae = self.saes[hook_name]
                             clean_acts = torch.matmul(clean_cache[hook_name][:, var_pos, h], self.model.W_O[l, h]).detach()
@@ -204,28 +206,31 @@ class IOICircuit(TransformerCircuit):
                             clean_acts = clean_cache[hook_name][:, var_pos]
                             corr_acts = corr_cache[hook_name][:, var_pos]
                         
-                        feature_vector = greedy_fs(sae, clean_acts, corr_acts, var_pos, h, N)
+                        if method == 'sae-fs':
+                            feature_vector = greedy_fs(sae, clean_acts, corr_acts, var_pos, h, N)
+                        elif method == 'sae-all':
+                            with torch.no_grad():
+                                feature_vector = sae(corr_acts) - clean_acts
 
                         if component_name == "z":
                             z_vectors[l].append((var_pos, feature_vector))
                         else:
                             hook_name = utils.get_act_name(component_name, l)
-                            rs_pre = clean_cache[utils.get_act_name('resid_pre', l)][:, var_pos]
                             if component_name == "q":
                                 M = self.model.W_Q[l, h]
                             elif component_name == "k":
                                 M = self.model.W_K[l, h]
                             elif component_name == "v":
                                 M = self.model.W_V[l, h]
-                            edit = torch.matmul(rs_pre + feature_vector[None], M)
+                            edit = torch.matmul(clean_acts + feature_vector[None], M)
                             hook_fn = partial(feature_qkv_patching_hook, pos=var_pos, head=h, edit=edit)
-
-                    if method != 'sae':
+                    
+                    if method not in ('sae-fs', 'sae-all'):
                         hooks.append((hook_name, hook_fn))
                     if verbose: print(f"Hooking L{l}H{h} {component_name} at position {var_pos}")
 
         # Add z hooks
-        if method == 'sae':            
+        if 'sae' in method:            
             for l in range(self.model.cfg.n_layers):
                 pos_dict = {}
                 hook_name = utils.get_act_name('attn_out', l)
@@ -243,7 +248,138 @@ class IOICircuit(TransformerCircuit):
         with torch.no_grad():
             patched_logits = self.model.run_with_hooks(clean_tokens, fwd_hooks=hooks)
 
-        return new_attr, clean_logits, patched_logits
+        return new_attr, clean_logits, patched_logits, corr_logits
+    """
+    def run_with_patch(
+            self, 
+            prompt: Dict[str, Union[str, Dict[str, str]]], 
+            node_names: List[str], 
+            attribute: str, 
+            method: str = 'zero',
+            patches: Optional[List[Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]]] = None,
+            verbose: bool = False,
+            new_attr: Optional[str] = None,
+            N: int = 4
+        ) -> Tuple[Optional[str], torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Function to run the circuit with a patch applied to the specified nodes.
+
+        Args:
+            prompt (dict): The prompt instance to be used.
+            node_names (list): The names of the nodes to be patched.
+            attribute (str): The attribute of the task to be patched.
+            method (str): The method to be used for patching (one of 'zero', 'corr', 'feature', 'sae-fs', 'sae-all'). Default is 'zero'.
+            patches (list, optional): The patches to be applied to the nodes if using 'feature' method. Default is None.
+            verbose (bool): Whether to print verbose information. Default is False.
+            new_attr (str, optional): The new attribute value for corruption. Default is None.
+            N (int): Number of features for greedy feature selection in 'sae-fs' method. Default is 4.
+
+        Returns:
+            tuple: A tuple containing the new attribute, clean logits, patched logits, and corrupted logits.
+        """
+        
+        def validate_inputs():
+            assert method in ['zero', 'corr', 'feature', 'sae-fs', 'sae-all'], "Invalid method: must be 'zero', 'corr', 'feature', 'sae-fs', or 'sae-all'"
+            assert attribute in ['IO', 'S', 'Pos'], "Invalid attribute: must be 'IO', 'S', or 'Pos'"
+            for node_name in node_names:
+                node, components = node_name.split('.')
+                assert self.get_node(node) is not None, f"Node {node} not found"
+                for c in components:
+                    assert c in self.components, f"Component {c} not found in the task"
+
+        def generate_corr_prompt(new_attr) -> str:
+            if attribute == 'IO':
+                new_io = ' ' + random.choice(list(set(self.names) - {io.strip(), s.strip()})) if new_attr is None else ' ' + new_attr
+                new_attr = new_io.strip()
+                return clean_prompt.replace(io, new_io), new_attr
+            elif attribute == 'S':
+                new_s = ' ' + random.choice(list(set(self.names) - {io.strip(), s.strip()})) if new_attr is None else ' ' + new_attr
+                new_attr = new_s.strip()
+                return clean_prompt.replace(s, new_s), new_attr
+            elif attribute == 'Pos':
+                new_template = self.task['templates'][1 - pos]
+                return new_template.format(IO=io.strip(), S1=s.strip(), S2=s.strip()), s.strip()
+
+        validate_inputs()
+
+        io = ' ' + prompt['variables']['IO']
+        s = ' ' + prompt['variables']['S1']
+        pos = 0 if prompt['variables']['Pos'] == "ABB" else 1
+        clean_prompt = prompt['prompt']
+        clean_tokens = self.model.to_tokens(clean_prompt)
+        
+        if verbose: 
+            print(f"Clean prompt: {clean_prompt}")
+
+        corr_logits = None
+        if method in ['corr', 'sae-fs', 'sae-all']:
+            corr_prompt, new_attr = generate_corr_prompt(new_attr)
+            corr_tokens = self.model.to_tokens(corr_prompt)
+            if verbose: 
+                print(f"Corrupted prompt: {corr_prompt}")
+            with torch.no_grad():
+                corr_logits, corr_cache = self.model.run_with_cache(corr_tokens)
+
+        with torch.no_grad():
+            clean_logits, clean_cache = self.model.run_with_cache(clean_tokens)
+
+        hooks = []
+        z_vectors = [[] for _ in range(self.model.cfg.n_layers)]
+
+        for i, name in enumerate(node_names):
+            node_name, components = name.split('.')
+            node = self.get_node(node_name)
+
+            for component_name in components:
+                var, offset = self.read_variable(node['q']) if component_name in ['q', 'z'] else self.read_variable(node['kv'])
+                var_pos = self.get_variable(var)['position'][pos] + offset
+
+                for head in node['heads']:
+                    l, h = map(int, head.split('.'))
+                    hook_name = utils.get_act_name(component_name, l)
+
+                    if method == 'zero':
+                        hook_fn = partial(zero_abl_hook, pos=var_pos, head=h)
+                    elif method == 'corr':
+                        hook_fn = partial(patching_hook, pos=var_pos, head=h, corr=corr_cache[hook_name])
+                    elif method == 'feature':
+                        f_in, f_out = patches[i][0][component_name][l], patches[i][1][component_name][l]
+                        hook_fn = partial(feature_patching_hook, pos=var_pos, head=h, f_in=f_in, f_out=f_out)
+                    elif 'sae' in method:
+                        clean_acts, corr_acts = (torch.matmul(clean_cache[hook_name][:, var_pos, h], self.model.W_O[l, h]).detach(),
+                                                torch.matmul(corr_cache[hook_name][:, var_pos, h], self.model.W_O[l, h]).detach()) \
+                                                if component_name == "z" else \
+                                                (clean_cache[utils.get_act_name('resid_pre', l)][:, var_pos], 
+                                                corr_cache[utils.get_act_name('resid_pre', l)][:, var_pos])
+                        sae = self.saes[utils.get_act_name('resid_pre', l)] if component_name != "z" else self.saes[hook_name]
+                        feature_vector = greedy_fs(sae, clean_acts, corr_acts, var_pos, h, N) if method == 'sae-fs' else sae(corr_acts) - clean_acts
+                        if component_name == "z":
+                            z_vectors[l].append((var_pos, feature_vector))
+                        else:
+                            M = getattr(self.model, f'W_{component_name.upper()}')[l, h]
+                            edit = torch.matmul(clean_acts + feature_vector[None], M)
+                            hook_fn = partial(feature_qkv_patching_hook, pos=var_pos, head=h, edit=edit)
+
+                    if method not in ('sae-fs', 'sae-all'):
+                        hooks.append((hook_name, hook_fn))
+                    
+                    if verbose:
+                        print(f"Hooking L{l}H{h} {component_name} at position {var_pos}")
+
+        if 'sae' in method:            
+            for l in range(self.model.cfg.n_layers):
+                pos_dict = {}
+                hook_name = utils.get_act_name('attn_out', l)
+                if z_vectors[l]:
+                    for pos, feature_vector in z_vectors[l]:
+                        pos_dict[pos] = pos_dict.get(pos, 0) + feature_vector
+                    for pos, feature_vector in pos_dict.items():
+                        hooks.append((hook_name, partial(feature_z_patching_hook, pos=pos, f_in=feature_vector)))
+
+        with torch.no_grad():
+            patched_logits = self.model.run_with_hooks(clean_tokens, fwd_hooks=hooks)
+
+        return new_attr, clean_logits, patched_logits, corr_logits
 
 
 # Feature search functions
