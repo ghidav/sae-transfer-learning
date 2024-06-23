@@ -34,21 +34,6 @@ model: HookedSAETransformer = HookedSAETransformer.from_pretrained("gpt2").to(de
 model.eval()
 
 ioi_circuit = IOICircuit(model, task)
-
-#load_z = False
-#load_resid_pre = False
-#for node in node_names:
-#    if 'z' in node:
-#        load_z = True
-#    else:
-#        load_resid_pre = True
-
-#if load_z:
-#    ioi_circuit.load_saes('z')
-#if load_resid_pre:
-#    ioi_circuit.load_saes('resid_pre')
-# TODO: Implement loading saes only for the reqired layers.
-
 ioi_circuit.load_saes('z')
 ioi_circuit.load_saes('resid_pre')
 
@@ -126,8 +111,8 @@ for node_names, node_label, attribute in zip(all_nodes, all_nodes_labels, attrib
                 in_patch = io_vec[pos][new_attr]
                 out_patch = s_vec[pos][s]
             else:
-                in_patch = pos_vec[pos]
-                out_patch = pos_vec[neg_pos]
+                in_patch = pos_vec[neg_pos]
+                out_patch = pos_vec[pos]
 
             patches.append((in_patch, out_patch))
 
@@ -172,4 +157,4 @@ for node_names, node_label, attribute in zip(all_nodes, all_nodes_labels, attrib
         scores_df['patch_sae_fs_score'].append(logits_score(clean_logits, patched_logits, corr_logits, ' '+io, ' '+new_attr))
 
     scores_df = pd.DataFrame(scores_df)
-    scores_df.to_json(f'tasks/ioi/scores/{attribute}_{node_label}.json')
+    scores_df.to_json(f'tasks/ioi/sc-scores/{attribute}_{node_label}.json')

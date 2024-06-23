@@ -8,7 +8,7 @@ from transformer_lens import utils
 from sae_lens import SAE
 from tqdm import tqdm
 from typing import Dict, List, Optional, Tuple, Union
-from hooks import zero_abl_hook, patching_hook, feature_patching_hook, feature_qkv_patching_hook, feature_z_patching_hook
+from hooks import zero_abl_hook, patching_hook, feature_patching_hook, feature_editing_hook
 
 class TransformerCircuit:
     def __init__(self, model, task):
@@ -46,7 +46,14 @@ class TransformerCircuit:
         elif component == 'resid_pre':
             sae_id = "gpt2-small-res-jb"
 
-        for layer in tqdm(range(self.model.cfg.n_layers)):
+        layers = []
+        for node in self.task['nodes']:
+            for head in node['heads']:
+                l, h = head.split('.')
+                if l not in layers:
+                    layers.append(l)
+        
+        for layer in tqdm(layers):
             sae, cfg_dict, _ = SAE.from_pretrained(
                 sae_id,
                 f'blocks.{layer}.hook_{component}',
@@ -352,21 +359,21 @@ class IOICircuit(TransformerCircuit):
                                                 (clean_cache[utils.get_act_name('resid_pre', l)][:, var_pos], 
                                                 corr_cache[utils.get_act_name('resid_pre', l)][:, var_pos])
                         sae = self.saes[utils.get_act_name('resid_pre', l)] if component_name != "z" else self.saes[hook_name]
-                        feature_vector = greedy_fs(sae, clean_acts, corr_acts, var_pos, h, N) if method == 'sae-fs' else sae(corr_acts) - clean_acts
+                        feature_vector = clean_acts + greedy_fs(sae, clean_acts, corr_acts, var_pos, h, N) if method == 'sae-fs' else sae(corr_acts)
                         if component_name == "z":
                             z_vectors[l].append((var_pos, feature_vector))
                         else:
                             M = getattr(self.model, f'W_{component_name.upper()}')[l, h]
-                            edit = torch.matmul(clean_acts + feature_vector[None], M)
-                            hook_fn = partial(feature_qkv_patching_hook, pos=var_pos, head=h, edit=edit)
+                            edit = torch.matmul(feature_vector[None], M)
+                            hook_fn = partial(feature_editing_hook, pos=var_pos, head=h, edit=edit)
 
-                    if method not in ('sae-fs', 'sae-all'):
+                    if not ('sae' in method and component_name == "z"):
                         hooks.append((hook_name, hook_fn))
                     
                     if verbose:
                         print(f"Hooking L{l}H{h} {component_name} at position {var_pos}")
 
-        if 'sae' in method:            
+        if 'sae' in method:
             for l in range(self.model.cfg.n_layers):
                 pos_dict = {}
                 hook_name = utils.get_act_name('attn_out', l)
@@ -374,12 +381,114 @@ class IOICircuit(TransformerCircuit):
                     for pos, feature_vector in z_vectors[l]:
                         pos_dict[pos] = pos_dict.get(pos, 0) + feature_vector
                     for pos, feature_vector in pos_dict.items():
-                        hooks.append((hook_name, partial(feature_z_patching_hook, pos=pos, f_in=feature_vector)))
+                        hooks.append((hook_name, partial(feature_editing_hook, pos=pos, edit=feature_vector)))
 
         with torch.no_grad():
             patched_logits = self.model.run_with_hooks(clean_tokens, fwd_hooks=hooks)
 
         return new_attr, clean_logits, patched_logits, corr_logits
+
+    def run_with_reconstruction(
+            self,
+            example: Dict[str, Union[str, Dict[str, str]]],
+            method: str,
+            node_names: List[str],
+            reconstruction: str = 'full',
+            averages: Optional[Dict[str, torch.Tensor]] = None,
+            features: Optional[List[Dict[str, torch.Tensor]]] = None,
+            verbose: bool = False
+        ) -> Tuple[Optional[str], torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Function to run the circuit with a reconstructed activations from the SAE.
+
+        Args:
+            example (dict): The example instance to be used.
+            method (str): The method to be used for patching (either 'supervised' or 'sae').
+            node_names (list): The names of the nodes to be patched.
+            reconstruction (str): The type of reconstruction to be used (either 'full' or 'average'). Default is 'full'.
+            verbose (bool): Whether to print verbose information. Default is False.
+
+        Returns:
+            tuple: A tuple containing the clean logits and the reconstructed logits.
+        """
+
+        pos = 0 if example['variables']['Pos'] == "ABB" else 1
+        prompt = example['prompt']
+        tokens = self.model.to_tokens(prompt)
+        
+        if verbose: 
+            print(f"Prompt: {prompt}")
+
+        with torch.no_grad():
+            logits, cache = self.model.run_with_cache(tokens)
+
+        hooks = []
+        z_vectors = [[] for _ in range(self.model.cfg.n_layers)]
+
+        for i, name in enumerate(node_names):
+            node_name, components = name.split('.')
+            node = self.get_node(node_name)
+
+            for component_name in components:
+                var, offset = self.read_variable(node['q']) if component_name in ['q', 'z'] else self.read_variable(node['kv'])
+                var_pos = self.get_variable(var)['position'][pos] + offset
+
+                for head in node['heads']:
+                    l, h = map(int, head.split('.'))
+                    hook_name = utils.get_act_name(component_name, l)
+
+                    if component_name == "z":
+                        acts = torch.matmul(cache[hook_name][:, var_pos, h], self.model.W_O[l, h]).detach()
+                    else:
+                        acts = cache[utils.get_act_name('resid_pre', l)][:, var_pos]
+
+                    sae = self.saes[utils.get_act_name('resid_pre', l)] if component_name != "z" else self.saes[hook_name]
+                    
+                    if reconstruction == 'average':
+                        average = torch.matmul(averages[component_name][None, l, var_pos, h], self.model.W_O[l, h])
+                        if method == 'sae':
+                            feature_vector = average + acts - sae(acts)
+                        elif method == 'supervised':
+                            f_rec = features[i][component_name][l, var_pos, h]
+                            feature_vector = average  + acts - torch.matmul(f_rec[None], self.model.W_O[l, h]) # [1 dm]
+                        elif method == 'ablation':
+                            feature_vector = average
+                    elif reconstruction == 'full':
+                        if method == 'sae':
+                            feature_vector = sae(acts)
+                        elif method == 'supervised':
+                            f_rec = features[i][component_name][None, l, var_pos, h]
+                            if component_name == "z":
+                                feature_vector = torch.matmul(f_rec, self.model.W_O[l, h]) # [1 dm]
+                            else:
+                                feature_vector = f_rec
+    
+                    if component_name == "z":
+                        z_vectors[l].append((var_pos, feature_vector))
+                    else:
+                        if method == 'sae':
+                            M = getattr(self.model, f'W_{component_name.upper()}')[l, h]
+                            feature_vector = torch.matmul(feature_vector[None], M)
+                            
+                        hook_fn = partial(feature_editing_hook, pos=var_pos, head=h, edit=feature_vector)
+                        hooks.append((hook_name, hook_fn))
+
+                    if verbose:
+                        print(f"Hooking L{l}H{h} {component_name} at position {var_pos}")
+   
+        for l in range(self.model.cfg.n_layers):
+            pos_dict = {}
+            hook_name = utils.get_act_name('attn_out', l)
+            if z_vectors[l]:
+                for pos, feature_vector in z_vectors[l]:
+                    pos_dict[pos] = pos_dict.get(pos, 0) + feature_vector
+                for pos, feature_vector in pos_dict.items():
+                    hooks.append((hook_name, partial(feature_editing_hook, pos=pos, edit=feature_vector)))
+
+        with torch.no_grad():
+            reconstructed_logits = self.model.run_with_hooks(tokens, fwd_hooks=hooks)
+
+        return logits, reconstructed_logits
 
 
 # Feature search functions
