@@ -8,7 +8,7 @@ from transformer_lens import utils
 from sae_lens import SAE
 from tqdm import tqdm
 from typing import Dict, List, Optional, Tuple, Union
-from hooks import zero_abl_hook, patching_hook, feature_patching_hook, feature_editing_hook
+from hooks import patching_hook, feature_patching_hook, editing_hook
 
 class TransformerCircuit:
     def __init__(self, model, task):
@@ -318,6 +318,7 @@ class IOICircuit(TransformerCircuit):
         if verbose: 
             print(f"Clean prompt: {clean_prompt}")
 
+        # Generate corrupted prompt if required
         corr_logits = None
         if method in ['corr', 'sae-fs', 'sae-all']:
             corr_prompt, new_attr = generate_corr_prompt(new_attr)
@@ -327,12 +328,14 @@ class IOICircuit(TransformerCircuit):
             with torch.no_grad():
                 corr_logits, corr_cache = self.model.run_with_cache(corr_tokens)
 
+        # Get clean logits and cache
         with torch.no_grad():
             clean_logits, clean_cache = self.model.run_with_cache(clean_tokens)
 
         hooks = []
         z_vectors = [[] for _ in range(self.model.cfg.n_layers)]
 
+        # Iterate over the nodes
         for i, name in enumerate(node_names):
             node_name, components = name.split('.')
             node = self.get_node(node_name)
@@ -345,27 +348,30 @@ class IOICircuit(TransformerCircuit):
                     l, h = map(int, head.split('.'))
                     hook_name = utils.get_act_name(component_name, l)
 
-                    if method == 'zero':
-                        hook_fn = partial(zero_abl_hook, pos=var_pos, head=h)
-                    elif method == 'corr':
-                        hook_fn = partial(patching_hook, pos=var_pos, head=h, corr=corr_cache[hook_name])
+                    if method == 'corr':
+                        hook_fn = partial(patching_hook, pos=var_pos, head=h, patch=corr_cache[hook_name][:, var_pos, h])
                     elif method == 'feature':
                         f_in, f_out = patches[i][0][component_name][l], patches[i][1][component_name][l]
                         hook_fn = partial(feature_patching_hook, pos=var_pos, head=h, f_in=f_in, f_out=f_out)
                     elif 'sae' in method:
-                        clean_acts, corr_acts = (torch.matmul(clean_cache[hook_name][:, var_pos, h], self.model.W_O[l, h]).detach(),
-                                                torch.matmul(corr_cache[hook_name][:, var_pos, h], self.model.W_O[l, h]).detach()) \
-                                                if component_name == "z" else \
-                                                (clean_cache[utils.get_act_name('resid_pre', l)][:, var_pos], 
-                                                corr_cache[utils.get_act_name('resid_pre', l)][:, var_pos])
+                        clean_acts = torch.matmul(clean_cache[hook_name][:, var_pos, h], self.model.W_O[l, h]) if component_name == "z" else clean_cache[utils.get_act_name('resid_pre', l)][:, var_pos] # [1 dm]
+                        corr_acts = torch.matmul(corr_cache[hook_name][:, var_pos, h], self.model.W_O[l, h]) if component_name == "z" else corr_cache[utils.get_act_name('resid_pre', l)][:, var_pos] # [1 dm]
+
                         sae = self.saes[utils.get_act_name('resid_pre', l)] if component_name != "z" else self.saes[hook_name]
-                        feature_vector = clean_acts + greedy_fs(sae, clean_acts, corr_acts, var_pos, h, N) if method == 'sae-fs' else sae(corr_acts)
+
+                        if method == 'sae-all':
+                            with torch.no_grad():
+                                clean_sae_acts = sae(clean_acts)
+                                corr_sae_acts = sae(corr_acts)
+                            edit = corr_sae_acts - clean_sae_acts
+                        else:
+                            edit = greedy_fs(sae, clean_acts, corr_acts, var_pos, h, N)
+
                         if component_name == "z":
-                            z_vectors[l].append((var_pos, feature_vector))
+                            z_vectors[l].append((var_pos, edit))
                         else:
                             M = getattr(self.model, f'W_{component_name.upper()}')[l, h]
-                            edit = torch.matmul(feature_vector[None], M)
-                            hook_fn = partial(feature_editing_hook, pos=var_pos, head=h, edit=edit)
+                            hook_fn = partial(editing_hook, pos=var_pos, head=h, edit=torch.matmul(edit, M))
 
                     if not ('sae' in method and component_name == "z"):
                         hooks.append((hook_name, hook_fn))
@@ -381,7 +387,7 @@ class IOICircuit(TransformerCircuit):
                     for pos, feature_vector in z_vectors[l]:
                         pos_dict[pos] = pos_dict.get(pos, 0) + feature_vector
                     for pos, feature_vector in pos_dict.items():
-                        hooks.append((hook_name, partial(feature_editing_hook, pos=pos, edit=feature_vector)))
+                        hooks.append((hook_name, partial(editing_hook, pos=pos, edit=feature_vector)))
 
         with torch.no_grad():
             patched_logits = self.model.run_with_hooks(clean_tokens, fwd_hooks=hooks)
@@ -412,6 +418,7 @@ class IOICircuit(TransformerCircuit):
             tuple: A tuple containing the clean logits and the reconstructed logits.
         """
 
+        # Get example variables
         pos = 0 if example['variables']['Pos'] == "ABB" else 1
         prompt = example['prompt']
         tokens = self.model.to_tokens(prompt)
@@ -419,17 +426,20 @@ class IOICircuit(TransformerCircuit):
         if verbose: 
             print(f"Prompt: {prompt}")
 
+        # Get logits and cache
         with torch.no_grad():
             logits, cache = self.model.run_with_cache(tokens)
 
         hooks = []
         z_vectors = [[] for _ in range(self.model.cfg.n_layers)]
 
+        # Iterate over the nodes
         for i, name in enumerate(node_names):
             node_name, components = name.split('.')
             node = self.get_node(node_name)
 
             for component_name in components:
+                # Read editing positions
                 var, offset = self.read_variable(node['q']) if component_name in ['q', 'z'] else self.read_variable(node['kv'])
                 var_pos = self.get_variable(var)['position'][pos] + offset
 
@@ -438,39 +448,50 @@ class IOICircuit(TransformerCircuit):
                     hook_name = utils.get_act_name(component_name, l)
 
                     if component_name == "z":
-                        acts = torch.matmul(cache[hook_name][:, var_pos, h], self.model.W_O[l, h]).detach()
-                    else:
-                        acts = cache[utils.get_act_name('resid_pre', l)][:, var_pos]
-
-                    sae = self.saes[utils.get_act_name('resid_pre', l)] if component_name != "z" else self.saes[hook_name]
-                    
-                    if reconstruction == 'average':
-                        average = torch.matmul(averages[component_name][None, l, var_pos, h], self.model.W_O[l, h])
-                        if method == 'sae':
-                            feature_vector = average + acts - sae(acts)
-                        elif method == 'supervised':
-                            f_rec = features[i][component_name][l, var_pos, h]
-                            feature_vector = average  + acts - torch.matmul(f_rec[None], self.model.W_O[l, h]) # [1 dm]
+                        z = cache[hook_name][:, var_pos, h] # [1 dh]
+                        zW = torch.matmul(z, self.model.W_O[l, h]) # [1 dm]
+                        if reconstruction == 'average':
+                            z_bar = averages[component_name][None, l, var_pos, h] # [1 dh]
+                            z_barW = torch.matmul(z_bar, self.model.W_O[l, h]) # [1 dm]
+                        
+                        if method == 'supervised':
+                            f = features[i][component_name][None, l, var_pos, h] # [1 dh]
+                            fW = torch.matmul(f, self.model.W_O[l, h]) # [1 dm]
+                            edit = fW - zW if reconstruction == 'full' else z_barW - fW
+                        elif method == 'sae':
+                            sae = self.saes[hook_name] 
+                            fW = sae(zW) # [1 dm]
+                            edit = fW - zW if reconstruction == 'full' else z_barW - fW
                         elif method == 'ablation':
-                            feature_vector = average
-                    elif reconstruction == 'full':
-                        if method == 'sae':
-                            feature_vector = sae(acts)
-                        elif method == 'supervised':
-                            f_rec = features[i][component_name][None, l, var_pos, h]
-                            if component_name == "z":
-                                feature_vector = torch.matmul(f_rec, self.model.W_O[l, h]) # [1 dm]
-                            else:
-                                feature_vector = f_rec
-    
-                    if component_name == "z":
-                        z_vectors[l].append((var_pos, feature_vector))
+                            edit = z_barW - zW
+                        
+                        z_vectors[l].append((var_pos, edit))
+
                     else:
-                        if method == 'sae':
-                            M = getattr(self.model, f'W_{component_name.upper()}')[l, h]
-                            feature_vector = torch.matmul(feature_vector[None], M)
+                        if method == 'ablation':
+                            acts = cache[hook_name][:, var_pos, h] # [1 dh]
+                            acts_bar = averages[component_name][None, l, var_pos, h] # [1 dh]
+                            edit = acts_bar - acts
+                        else:
+                            if method == 'supervised':
+                                acts = cache[hook_name][:, var_pos, h] # [1 dh]
+                                fW  = features[i][component_name][None, l, var_pos, h] # [1 dh]
+
+                            elif method == 'sae':
+                                acts = cache[utils.get_act_name('resid_pre', l)][:, var_pos] # [1 dm]
+                                sae = self.saes[utils.get_act_name('resid_pre', l)]
+                                f = sae(acts) # [1 dm]
+                                W = getattr(self.model, f'W_{component_name.upper()}')[l, h]
+                                fW = torch.matmul(f, W) # [1 dh]
+                                acts = torch.matmul(acts, W) # [1 dh]
                             
-                        hook_fn = partial(feature_editing_hook, pos=var_pos, head=h, edit=feature_vector)
+                            if reconstruction == 'full':
+                                edit = fW - acts
+                            elif reconstruction == 'average':
+                                acts_bar = averages[component_name][None, l, var_pos, h] # [1 dh]
+                                edit = acts_bar - fW
+
+                        hook_fn = partial(editing_hook, pos=var_pos, head=h, edit=edit)
                         hooks.append((hook_name, hook_fn))
 
                     if verbose:
@@ -483,7 +504,7 @@ class IOICircuit(TransformerCircuit):
                 for pos, feature_vector in z_vectors[l]:
                     pos_dict[pos] = pos_dict.get(pos, 0) + feature_vector
                 for pos, feature_vector in pos_dict.items():
-                    hooks.append((hook_name, partial(feature_editing_hook, pos=pos, edit=feature_vector)))
+                    hooks.append((hook_name, partial(editing_hook, pos=pos, edit=feature_vector)))
 
         with torch.no_grad():
             reconstructed_logits = self.model.run_with_hooks(tokens, fwd_hooks=hooks)
@@ -553,4 +574,4 @@ def greedy_fs(sae, clean_acts, corr_acts, pos, head, N):
         corr_acts_ -= sae_corr_acts[best_in_feature[-1]] * W_dec[best_in_feature[-1]]
 
     feature_vector = clean_acts_ - clean_acts + corr_acts - corr_acts_
-    return feature_vector.squeeze()
+    return feature_vector

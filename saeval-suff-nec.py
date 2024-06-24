@@ -69,7 +69,7 @@ for node_names, node_label, attribute in zip(all_nodes, all_nodes_labels, attrib
         'ablation_ld': []
     }
 
-    for idx in tqdm(range(32)):
+    for idx in tqdm(range(512)):
 
         example = task['prompts'][idx]
 
