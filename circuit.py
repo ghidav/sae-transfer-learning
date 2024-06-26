@@ -63,40 +63,47 @@ class TransformerCircuit:
 
 # Class for IOI circuit
 class IOICircuit(TransformerCircuit):
-    def __init__(self, model, cfg):
+    def __init__(self, model, cfg, prompts, names):
         super().__init__(model, cfg)
-        self.names = self.get_variable('IO')['values']
+        self.prompts = prompts
+        self.names = names
         self.components = ['q', 'k', 'v', 'z']
 
-    def create_task_df(self):
+    def create_task_df(self, verbose=False):
         task_df = {
             'prompt': [],
             'IO': [],
             'S1': [],
             'S2': [],
-            'Pos': [],
+            'POS': [],
             'IO_pos': [],
             'S1_pos': [],
-            'S2_pos': []
+            'S2_pos': [],
+            'END': [],
         }
-
-        for i, prompt in enumerate(self.task['prompts']):
+        bar = tqdm(self.prompts) if verbose else self.prompts
+        for i, prompt in bar:
             task_df['prompt'].append(prompt['prompt'])
-            task_df['IO'].append(prompt['variables']['IO'])
-            task_df['S1'].append(prompt['variables']['S1'])
-            task_df['S2'].append(prompt['variables']['S2'])
+            
+            io_pos = prompt['variables']['IO']
+            s1_pos = prompt['variables']['S1']
+            s2_pos = prompt['variables']['S2']
 
-            pos = prompt['variables']['Pos']
+            pos = prompt['variables']['POS']
             pos = 0 if pos == "ABB" else 1
-            task_df['Pos'].append(pos)
+            task_df['POS'].append(pos)
 
-            io_pos = self.get_variable('IO')['position'][pos]
-            s1_pos = self.get_variable('S1')['position'][pos]
-            s2_pos = self.get_variable('S2')['position'][pos]
+            tokens = self.model.to_str_tokens(prompt['prompt'])
 
+            task_df['IO'].append(tokens[io_pos])
+            task_df['S1'].append(tokens[s1_pos])
+            task_df['S2'].append(tokens[s2_pos])
+            
             task_df['IO_pos'].append(io_pos)
             task_df['S1_pos'].append(s1_pos)
             task_df['S2_pos'].append(s2_pos)
+
+            task_df['END'].append(prompt['variables']['END'])
 
         return pd.DataFrame(task_df)
     """
