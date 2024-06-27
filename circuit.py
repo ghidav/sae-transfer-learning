@@ -106,164 +106,8 @@ class IOICircuit(TransformerCircuit):
             task_df['END'].append(prompt['variables']['END'])
 
         return pd.DataFrame(task_df)
-    """
-    def run_with_patch(
-            self, 
-            prompt: dict, 
-            node_names: str, 
-            attribute: str, 
-            method: str ='zero',
-            patches: list=None,
-            verbose: bool=False,
-            new_attr: str=None,
-            N: int=4
-            ):
-        '''
-        Function to run the circuit with a patch applied to the specified nodes.
-        Takes in:
-        - prompt: the prompt instance to be used
-        - node_names: the names of the nodes to be patched
-        - attribute: the attribute of the task to be patched
-        - method: the method to be used for patching (one of 'zero', 'corr', 'feature')
-        - patches: the patches to be applied to the nodes if using 'feature' method
+    
 
-        Returns the difference of answer logits between the clean and patched prompt.
-        '''
-        # Checks
-        assert method in ['zero', 'corr', 'feature', 'sae-fs', 'sae-all'], "Method must be either 'zero', 'corr', 'feature'"
-        assert attribute in ['IO', 'S', 'Pos'], "Attribute must be either 'IO', 'S', 'Pos'"
-        for node_name in node_names:
-            node, components = node_name.split('.')
-            assert self.get_node(node) is not None, f"Node {node_name} not found in the task"
-            for c in components:
-                assert c in self.components, f"Component {c} not found in the task"
-        
-        # Extracting variables from the prompt
-        io = ' '+prompt['variables']['IO']
-        s = ' '+prompt['variables']['S1']
-        pos = prompt['variables']['Pos']
-        pos = 0 if pos == "ABB" else 1
-
-        clean_prompt = prompt['prompt']
-        clean_tokens = self.model.to_tokens(clean_prompt)
-        corr_logits = None
-        if verbose: print(f"Clean prompt: {clean_prompt}")
-
-        if method in ['corr', 'sae-fs', 'sae-all']:
-            # Creation of the corrupted prompt based on the attribute
-            if attribute == 'IO':
-                # Pick a random new name to put in IO
-                new_io = ' ' + random.choice(list(set(self.names) - {io[1:], s[1:]})) if new_attr is None else ' '+new_attr
-                new_attr = new_io[1:]
-                corr_prompt = clean_prompt.replace(io, new_io)
-            elif attribute == 'S':
-                # Pick a random new name to put in S
-                new_s = ' ' + random.choice(list(set(self.names) - {io[1:], s[1:]})) if new_attr is None else ' '+new_attr
-                new_attr = new_s[1:]
-                corr_prompt = clean_prompt.replace(s, new_s)
-            elif attribute == 'Pos':
-                # Generate a new prompt with the opposite template
-                new_template = self.task['templates'][1-pos]
-                corr_prompt = new_template.format(IO=io[1:], S1=s[1:], S2=s[1:])
-
-            corr_tokens = self.model.to_tokens(corr_prompt)
-            if verbose: print(f"Corrupted prompt: {corr_prompt}")
-            
-            with torch.no_grad():
-                corr_logits, corr_cache = self.model.run_with_cache(corr_tokens)
-
-        with torch.no_grad():
-            clean_logits, clean_cache = self.model.run_with_cache(clean_tokens)
-        
-        # Hooking the model for patching
-        hooks = []
-        z_vectors = [[] for l in range(self.model.cfg.n_layers)]
-
-        for i, name in enumerate(node_names):
-            # Split the node name into components (e.g. IH.qk -> IH, qk)
-            node_name, components = name.split('.')
-            node = self.get_node(node_name)
-
-            # Add hooks to selected component of the node
-            for component_name in components:
-                if component_name in ['q', 'z']:
-                    # Read the variable name and offset (e.g. IH.q -> S2+0 | PTH.z -> S1+1)
-                    var, offset = self.read_variable(node['q'])
-                else:
-                    var, offset = self.read_variable(node['kv'])
-
-                # Retrieve the token position of the variable
-                var_pos = self.get_variable(var)['position'][pos] + offset
-
-                # Add hooks to the component of each node head
-                for head in node['heads']:
-                    l, h = head.split('.')
-                    l, h = int(l), int(h)
-                    hook_name = utils.get_act_name(component_name, l)
-                    
-                    if method == 'zero':
-                        hook_fn = partial(zero_abl_hook, pos=var_pos, head=h)
-                    elif method == 'corr':
-                        hook_fn = partial(patching_hook, pos=var_pos, head=h, corr=corr_cache[hook_name])
-                    elif method == 'feature':
-                        f_in = patches[i][0][component_name][l]
-                        f_out = patches[i][1][component_name][l]
-                        hook_fn = partial(feature_patching_hook, pos=var_pos, head=h, f_in=f_in, f_out=f_out)
-                    elif 'sae' in method:
-                        if component_name == "z":
-                            sae = self.saes[hook_name]
-                            clean_acts = torch.matmul(clean_cache[hook_name][:, var_pos, h], self.model.W_O[l, h]).detach()
-                            corr_acts = torch.matmul(corr_cache[hook_name][:, var_pos, h], self.model.W_O[l, h]).detach()
-                        else:
-                            hook_name = utils.get_act_name('resid_pre', l)
-                            sae = self.saes[hook_name]
-                            clean_acts = clean_cache[hook_name][:, var_pos]
-                            corr_acts = corr_cache[hook_name][:, var_pos]
-                        
-                        if method == 'sae-fs':
-                            feature_vector = greedy_fs(sae, clean_acts, corr_acts, var_pos, h, N)
-                        elif method == 'sae-all':
-                            with torch.no_grad():
-                                feature_vector = sae(corr_acts) - clean_acts
-
-                        if component_name == "z":
-                            z_vectors[l].append((var_pos, feature_vector))
-                        else:
-                            hook_name = utils.get_act_name(component_name, l)
-                            if component_name == "q":
-                                M = self.model.W_Q[l, h]
-                            elif component_name == "k":
-                                M = self.model.W_K[l, h]
-                            elif component_name == "v":
-                                M = self.model.W_V[l, h]
-                            edit = torch.matmul(clean_acts + feature_vector[None], M)
-                            hook_fn = partial(feature_qkv_patching_hook, pos=var_pos, head=h, edit=edit)
-                    
-                    if method not in ('sae-fs', 'sae-all'):
-                        hooks.append((hook_name, hook_fn))
-                    if verbose: print(f"Hooking L{l}H{h} {component_name} at position {var_pos}")
-
-        # Add z hooks
-        if 'sae' in method:            
-            for l in range(self.model.cfg.n_layers):
-                pos_dict = {}
-                hook_name = utils.get_act_name('attn_out', l)
-                if len(z_vectors[l]) > 0:
-                    for pos, feature_vector in z_vectors[l]:
-                        if pos in pos_dict:
-                            pos_dict[pos] += feature_vector
-                        else:
-                            pos_dict[pos] = feature_vector
-                    
-                    for pos, feature_vector in pos_dict.items():
-                        hook_fn = partial(feature_z_patching_hook, pos=pos, f_in=feature_vector)
-                        hooks.append((hook_name, hook_fn))
-
-        with torch.no_grad():
-            patched_logits = self.model.run_with_hooks(clean_tokens, fwd_hooks=hooks)
-
-        return new_attr, clean_logits, patched_logits, corr_logits
-    """
     def run_with_patch(
             self, 
             prompt: Dict[str, Union[str, Dict[str, str]]], 
@@ -316,11 +160,12 @@ class IOICircuit(TransformerCircuit):
 
         validate_inputs()
 
-        io = ' ' + prompt['variables']['IO']
-        s = ' ' + prompt['variables']['S1']
-        pos = 0 if prompt['variables']['Pos'] == "ABB" else 1
         clean_prompt = prompt['prompt']
         clean_tokens = self.model.to_tokens(clean_prompt)
+        clean_str_tokens = self.model.to_str_tokens(clean_prompt)
+        io = clean_str_tokens[prompt['variables']['IO']]
+        s = clean_str_tokens[prompt['variables']['S1']]
+        pos = 0 if prompt['variables']['POS'] == "ABB" else 1
         
         if verbose: 
             print(f"Clean prompt: {clean_prompt}")
@@ -330,6 +175,9 @@ class IOICircuit(TransformerCircuit):
         if method in ['corr', 'sae-fs', 'sae-all']:
             corr_prompt, new_attr = generate_corr_prompt(new_attr)
             corr_tokens = self.model.to_tokens(corr_prompt)
+
+            assert clean_tokens.shape[-1] == corr_tokens.shape[-1], "Clean and corrupted prompts must have the same length"
+
             if verbose: 
                 print(f"Corrupted prompt: {corr_prompt}")
             with torch.no_grad():
@@ -349,7 +197,7 @@ class IOICircuit(TransformerCircuit):
 
             for component_name in components:
                 var, offset = self.read_variable(node['q']) if component_name in ['q', 'z'] else self.read_variable(node['kv'])
-                var_pos = self.get_variable(var)['position'][pos] + offset
+                var_pos = prompt['variables'][var] + offset
 
                 for head in node['heads']:
                     l, h = map(int, head.split('.'))
@@ -426,7 +274,7 @@ class IOICircuit(TransformerCircuit):
         """
 
         # Get example variables
-        pos = 0 if example['variables']['Pos'] == "ABB" else 1
+        pos = 0 if example['variables']['POS'] == "ABB" else 1
         prompt = example['prompt']
         tokens = self.model.to_tokens(prompt)
         
@@ -448,7 +296,7 @@ class IOICircuit(TransformerCircuit):
             for component_name in components:
                 # Read editing positions
                 var, offset = self.read_variable(node['q']) if component_name in ['q', 'z'] else self.read_variable(node['kv'])
-                var_pos = self.get_variable(var)['position'][pos] + offset
+                var_pos = prompt['variables'][var] + offset
 
                 for head in node['heads']:
                     l, h = map(int, head.split('.'))
