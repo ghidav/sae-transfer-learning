@@ -26,20 +26,32 @@ def logits_score(clean_logits, patched_logits, corr_logits, correct_answer, inco
     return score
 
 # Load task
-with open('tasks/ioi/task.json') as f:
-    task = json.load(f)
+with open('tasks/ioi/cfg.json') as f:
+    cfg = json.load(f)
+
+with open('tasks/ioi/prompts.json') as f:
+    prompts = json.load(f)
+
+with open('tasks/ioi/names.json') as f:
+    names = json.load(f)
+
 
 # Load model and SAEs
 model: HookedSAETransformer = HookedSAETransformer.from_pretrained("gpt2").to(device)
 model.eval()
 
-ioi_circuit = IOICircuit(model, task)
+ioi_circuit = IOICircuit(
+    model=model,
+    cfg=cfg,
+    prompts=prompts,
+    names=names)
+
 ioi_circuit.load_saes('z')
 ioi_circuit.load_saes('resid_pre')
 
 # Compute supervised dictionary
 bs = 64
-prompts = [p['prompt'] for p in task['prompts']]
+prompts = [p['prompt'] for p in prompts]
 activations = {i: [] for i in ['q', 'k', 'v', 'z']}
 for b in tqdm(range(0, len(prompts), bs)):
     tokens = model.to_tokens(prompts[b:b+bs])
@@ -48,7 +60,9 @@ for b in tqdm(range(0, len(prompts), bs)):
         _, cache = model.run_with_cache(tokens)
 
     for key in activations.keys():
-        activations[key].append(cache.stack_activation(key))
+        activations[key].append(cache.stack_activation(key).cpu())
+
+    del cache
 
 activations = {key: torch.cat(values, 1) for key, values in activations.items()}
 mean_activations = {key: torch.mean(values, 1) for key, values in activations.items()} # [l pos h dm]
@@ -71,12 +85,16 @@ for node_names, node_label, attribute in zip(all_nodes, all_nodes_labels, attrib
 
     for idx in tqdm(range(512)):
 
-        example = task['prompts'][idx]
+        example = prompts[idx]
+        str_tokens = model.to_str_tokens(example['prompt'])
 
-        io = example['variables']['IO']
-        s = example['variables']['S2']
+        io_pos = example['variables']['IO']
+        s_pos = example['variables']['S2']
 
-        pos = example['variables']['Pos']
+        io = str_tokens[io_pos]
+        s = str_tokens[s_pos]
+
+        pos = example['variables']['POS']
         neg_pos = 'ABB' if pos == 'BAB' else 'BAB'
 
         pos_id = 0 if pos == 'ABB' else 1
@@ -85,9 +103,9 @@ for node_names, node_label, attribute in zip(all_nodes, all_nodes_labels, attrib
         all_features = []
         for node in node_names:
             if attribute == 'IO':
-                features = s_vec[pos][io]
+                features = s_vec[pos][io[1:]]
             elif attribute == 'S':
-                features = s_vec[pos][s]
+                features = s_vec[pos][s[1:]]
             else:
                 features = pos_vec[pos]
 

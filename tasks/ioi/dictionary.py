@@ -1,9 +1,7 @@
 import json
 
-with open('tasks/ioi/cfg.json') as f:
-    cfg = json.load(f)
-
-names = cfg['variables'][0]['values']
+with open('tasks/ioi/names.json') as f:
+    names = json.load(f)
 
 def supervised_dictionary(df, activations):
     
@@ -24,16 +22,16 @@ def supervised_dictionary(df, activations):
 
         for c in ['q', 'k', 'v', 'z']:
             centered_activations = activations[c] - activations[c].mean(2).mean(1)[:, None, None]
-            mask = (df['IO'] == name) & (df['Pos'] == 0)
+            mask = (df['IO'] == name) & (df['POS'] == 0)
             io_vec['ABB'][name][c] = centered_activations[:, mask].mean(1)
 
-            mask = (df['IO'] == name) & (df['Pos'] == 1)
+            mask = (df['IO'] == name) & (df['POS'] == 1)
             io_vec['BAB'][name][c] = centered_activations[:, mask].mean(1)
 
-            mask = (df['S1'] == name) & (df['Pos'] == 0)
+            mask = (df['S1'] == name) & (df['POS'] == 0)
             s_vec['ABB'][name][c] = centered_activations[:, mask].mean(1)
 
-            mask = (df['S1'] == name) & (df['Pos'] == 1)
+            mask = (df['S1'] == name) & (df['POS'] == 1)
             s_vec['BAB'][name][c] = centered_activations[:, mask].mean(1)
 
     # Pos

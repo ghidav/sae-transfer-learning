@@ -81,8 +81,9 @@ class IOICircuit(TransformerCircuit):
             'S2_pos': [],
             'END': [],
         }
-        bar = tqdm(self.prompts) if verbose else self.prompts
-        for i, prompt in bar:
+
+        for prompt in self.prompts:
+
             task_df['prompt'].append(prompt['prompt'])
             
             io_pos = prompt['variables']['IO']
