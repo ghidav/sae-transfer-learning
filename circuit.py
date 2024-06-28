@@ -11,19 +11,19 @@ from typing import Dict, List, Optional, Tuple, Union
 from hooks import patching_hook, feature_patching_hook, editing_hook
 
 class TransformerCircuit:
-    def __init__(self, model, task):
+    def __init__(self, model, cfg):
         self.model = model
-        self.task = task
+        self.cfg = cfg
         self.saes = {}
 
     def get_node(self, node_name):
-        for node in self.task['nodes']:
+        for node in self.cfg['nodes']:
             if node['name'] == node_name:
                 return node
         return None
 
     def get_variable(self, variable_name):
-        for variable in self.task['variables']:
+        for variable in self.cfg['variables']:
             if variable['name'] == variable_name:
                 return variable
         return None
@@ -47,7 +47,7 @@ class TransformerCircuit:
             sae_id = "gpt2-small-res-jb"
 
         layers = []
-        for node in self.task['nodes']:
+        for node in self.cfg['nodes']:
             for head in node['heads']:
                 l, h = head.split('.')
                 if l not in layers:
@@ -78,12 +78,12 @@ class IOICircuit(TransformerCircuit):
             'POS': [],
             'IO_pos': [],
             'S1_pos': [],
+            'S1+1_pos': [],
             'S2_pos': [],
             'END': [],
         }
 
         for prompt in self.prompts:
-
             task_df['prompt'].append(prompt['prompt'])
             
             io_pos = prompt['variables']['IO']
@@ -102,6 +102,7 @@ class IOICircuit(TransformerCircuit):
             
             task_df['IO_pos'].append(io_pos)
             task_df['S1_pos'].append(s1_pos)
+            task_df['S1+1_pos'].append(s1_pos + 1)
             task_df['S2_pos'].append(s2_pos)
 
             task_df['END'].append(prompt['variables']['END'])
