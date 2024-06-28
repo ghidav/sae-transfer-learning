@@ -9,6 +9,62 @@ from sae_lens import SAE
 from tqdm import tqdm
 from typing import Dict, List, Optional, Tuple, Union
 from hooks import patching_hook, feature_patching_hook, editing_hook
+import json
+
+with open('tasks/ioi/names.json') as f:
+    NAMES = json.load(f)
+
+DEVICE = 'cuda'
+
+class IOIPrompt:
+    def __init__(self, prompt):
+        self.text = prompt['prompt']
+        self.variables = prompt['variables']
+
+    def get_variable(self, variable_name):
+        return self.variables[variable_name]
+
+    def tokenize(self, model):
+        self.tokens =  model.to_tokens(self.text)
+        self.str_tokens = model.to_str_tokens(self.text)
+
+    def get_variable(self, variable_name):
+        return self.variables[variable_name]
+
+    def generate_corrupted(self, attribute, model):
+
+        if not hasattr(self, 'tokens'):
+            self.tokenize(model)
+
+        if attribute == 'IO' or attribute == 'S':
+            attr = self.get_variable(attribute)[1:]
+            new_attr = random.choice(list(set(NAMES) - {attr}))
+            corr_prompt = {
+                'prompt': self.text.replace(attr, new_attr),
+                'variables': self.variables.copy()
+            }
+            for key in corr_prompt['variables']:
+                if attribute in key:
+                    corr_prompt['variables'][key] = new_attr
+            return IOIPrompt(corr_prompt)
+        elif attribute == 'POS':
+            io_pos = self.get_variable('IO_pos')
+            s1_pos = self.get_variable('S1_pos')
+            neg_pos = 'ABB' if self.get_variable('POS') == 'BAB' else 'BAB'
+
+            new_str_tokens = self.str_tokens.copy()
+            new_str_tokens[io_pos] = self.str_tokens[s1_pos]
+            new_str_tokens[s1_pos] = self.str_tokens[io_pos]
+
+            corr_prompt = {
+                'prompt': model.tokenizer.convert_tokens_to_string(new_str_tokens[1:]),
+                'variables': self.variables.copy()
+            }
+            corr_prompt['variables']['POS'] = neg_pos
+            corr_prompt['variables']['IO_pos'] = s1_pos
+            corr_prompt['variables']['S1_pos'] = io_pos
+            return  IOIPrompt(corr_prompt)
+
 
 class TransformerCircuit:
     def __init__(self, model, cfg):
@@ -26,6 +82,19 @@ class TransformerCircuit:
         for variable in self.cfg['variables']:
             if variable['name'] == variable_name:
                 return variable
+        return None
+
+    def get_node_attr(self, node_name, component):
+        node = self.get_node(node_name)
+        if node is not None:
+            attr = node['q' if component in 'q' else 'kv']
+            if '+' in attr: 
+                var, offset = attr.split('+')
+            elif '-' in attr:
+                var, offset = attr.split('-')
+            else:
+                var, offset = attr, 0
+            return var, int(offset)
         return None
 
     @classmethod
@@ -65,16 +134,15 @@ class TransformerCircuit:
 class IOICircuit(TransformerCircuit):
     def __init__(self, model, cfg, prompts, names):
         super().__init__(model, cfg)
-        self.prompts = prompts
+        self.prompts = [IOIPrompt(p) for p in prompts]
         self.names = names
         self.components = ['q', 'k', 'v', 'z']
 
-    def create_task_df(self, verbose=False):
+    def create_task_df(self):
         task_df = {
             'prompt': [],
             'IO': [],
-            'S1': [],
-            'S2': [],
+            'S': [],
             'POS': [],
             'IO_pos': [],
             'S1_pos': [],
@@ -84,30 +152,17 @@ class IOICircuit(TransformerCircuit):
         }
 
         for prompt in self.prompts:
-            task_df['prompt'].append(prompt['prompt'])
-            
-            io_pos = prompt['variables']['IO']
-            s1_pos = prompt['variables']['S1']
-            s2_pos = prompt['variables']['S2']
+            task_df['prompt'].append(prompt.text)
+            task_df['POS'].append(prompt.get_variable('POS'))
+            task_df['IO'].append(prompt.get_variable('IO'))
+            task_df['S'].append(prompt.get_variable('S'))
+            task_df['IO_pos'].append(prompt.get_variable('IO_pos'))
+            task_df['S1_pos'].append(prompt.get_variable('S1_pos'))
+            task_df['S1+1_pos'].append(prompt.get_variable('S1_pos') + 1)
+            task_df['S2_pos'].append(prompt.get_variable('S2_pos'))
+            task_df['END'].append(prompt.get_variable('END'))
 
-            pos = prompt['variables']['POS']
-            pos = 0 if pos == "ABB" else 1
-            task_df['POS'].append(pos)
-
-            tokens = self.model.to_str_tokens(prompt['prompt'])
-
-            task_df['IO'].append(tokens[io_pos])
-            task_df['S1'].append(tokens[s1_pos])
-            task_df['S2'].append(tokens[s2_pos])
-            
-            task_df['IO_pos'].append(io_pos)
-            task_df['S1_pos'].append(s1_pos)
-            task_df['S1+1_pos'].append(s1_pos + 1)
-            task_df['S2_pos'].append(s2_pos)
-
-            task_df['END'].append(prompt['variables']['END'])
-
-        return pd.DataFrame(task_df)
+        self.task_df = pd.DataFrame(task_df)
     
 
     def run_with_patch(
@@ -253,19 +308,17 @@ class IOICircuit(TransformerCircuit):
 
     def run_with_reconstruction(
             self,
-            example: Dict[str, Union[str, Dict[str, str]]],
+            prompt: IOIPrompt,
             method: str,
             node_names: List[str],
             reconstruction: str = 'full',
-            averages: Optional[Dict[str, torch.Tensor]] = None,
-            features: Optional[List[Dict[str, torch.Tensor]]] = None,
             verbose: bool = False
         ) -> Tuple[Optional[str], torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """
         Function to run the circuit with a reconstructed activations from the SAE.
 
         Args:
-            example (dict): The example instance to be used.
+            prompt (cls): The prompt instance to be used.
             method (str): The method to be used for patching (either 'supervised' or 'sae').
             node_names (list): The names of the nodes to be patched.
             reconstruction (str): The type of reconstruction to be used (either 'full' or 'average'). Default is 'full'.
@@ -275,45 +328,45 @@ class IOICircuit(TransformerCircuit):
             tuple: A tuple containing the clean logits and the reconstructed logits.
         """
 
-        # Get example variables
-        pos = 0 if example['variables']['POS'] == "ABB" else 1
-        prompt = example['prompt']
-        tokens = self.model.to_tokens(prompt)
-        
         if verbose: 
-            print(f"Prompt: {prompt}")
+            print(f"Prompt: {prompt.text}")
 
         # Get logits and cache
         with torch.no_grad():
-            logits, cache = self.model.run_with_cache(tokens)
+            logits, cache = self.model.run_with_cache(prompt.tokens)
 
         hooks = []
         z_vectors = [[] for _ in range(self.model.cfg.n_layers)]
 
         # Iterate over the nodes
         for i, name in enumerate(node_names):
+            
             node_name, components = name.split('.')
             node = self.get_node(node_name)
 
             for component_name in components:
-                # Read editing positions
-                var, offset = self.read_variable(node['q']) if component_name in ['q', 'z'] else self.read_variable(node['kv'])
-                var_pos = prompt['variables'][var] + offset
+                # Read editing position
+                attr, offset = self.get_node_attr(node_name, component_name)
+                full_attr = node['q' if component_name in 'qz' else 'kv']
+                attr_pos = prompt.get_variable(f"{attr}_pos" if attr != "END" else attr) + offset
 
                 for head in node['heads']:
                     l, h = map(int, head.split('.'))
                     hook_name = utils.get_act_name(component_name, l)
 
                     if component_name == "z":
-                        z = cache[hook_name][:, var_pos, h] # [1 dh]
+                        z = cache[hook_name][:, attr_pos, h] # [1 dh]
                         zW = torch.matmul(z, self.model.W_O[l, h]) # [1 dm]
                         if reconstruction == 'average':
-                            z_bar = averages[component_name][None, l, var_pos, h] # [1 dh]
+                            z_bar = self.avg_activations[component_name][full_attr][None, l, h].to(DEVICE) # [1 dh]
                             z_barW = torch.matmul(z_bar, self.model.W_O[l, h]) # [1 dm]
                         
                         if method == 'supervised':
-                            f = features[i][component_name][None, l, var_pos, h] # [1 dh]
-                            fW = torch.matmul(f, self.model.W_O[l, h]) # [1 dm]
+                            f = self.get_supervised_feature(attribute='IO', name=prompt.get_variable('IO'), component=component_name, position=full_attr)
+                            f += self.get_supervised_feature(attribute='S', name=prompt.get_variable('S'), component=component_name, position=full_attr)
+                            f += self.get_supervised_feature(attribute='POS', name=prompt.get_variable('POS'), component=component_name, position=full_attr) # [l h dm]
+                            
+                            fW = torch.matmul(f[None, l, h].to(DEVICE), self.model.W_O[l, h]) # [1 dm]
                             edit = fW - zW if reconstruction == 'full' else z_barW - fW
                         elif method == 'sae':
                             sae = self.saes[hook_name] 
@@ -322,20 +375,23 @@ class IOICircuit(TransformerCircuit):
                         elif method == 'ablation':
                             edit = z_barW - zW
                         
-                        z_vectors[l].append((var_pos, edit))
+                        z_vectors[l].append((attr_pos, edit))
 
                     else:
                         if method == 'ablation':
-                            acts = cache[hook_name][:, var_pos, h] # [1 dh]
-                            acts_bar = averages[component_name][None, l, var_pos, h] # [1 dh]
+                            acts = cache[hook_name][:, attr_pos, h] # [1 dh]
+                            acts_bar = self.avg_activations[component_name][full_attr][None, l, h].to(DEVICE) # [1 dh]
                             edit = acts_bar - acts
                         else:
                             if method == 'supervised':
-                                acts = cache[hook_name][:, var_pos, h] # [1 dh]
-                                fW  = features[i][component_name][None, l, var_pos, h] # [1 dh]
+                                acts = cache[hook_name][:, attr_pos, h] # [1 dh]
+                                fW = self.get_supervised_feature(attribute='IO', name=prompt.get_variable('IO'), component=component_name, position=full_attr)
+                                fW += self.get_supervised_feature(attribute='S', name=prompt.get_variable('S'), component=component_name, position=full_attr)
+                                fW += self.get_supervised_feature(attribute='POS', name=prompt.get_variable('POS'), component=component_name, position=full_attr) # [l h dm]
+                                fW = fW[None, l, h].to(DEVICE)
 
                             elif method == 'sae':
-                                acts = cache[utils.get_act_name('resid_pre', l)][:, var_pos] # [1 dm]
+                                acts = cache[utils.get_act_name('resid_pre', l)][:, attr_pos] # [1 dm]
                                 sae = self.saes[utils.get_act_name('resid_pre', l)]
                                 f = sae(acts) # [1 dm]
                                 W = getattr(self.model, f'W_{component_name.upper()}')[l, h]
@@ -345,14 +401,14 @@ class IOICircuit(TransformerCircuit):
                             if reconstruction == 'full':
                                 edit = fW - acts
                             elif reconstruction == 'average':
-                                acts_bar = averages[component_name][None, l, var_pos, h] # [1 dh]
+                                acts_bar = self.avg_activations[component_name][full_attr][None, l, h].to(DEVICE) # [1 dh]
                                 edit = acts_bar - fW
 
-                        hook_fn = partial(editing_hook, pos=var_pos, head=h, edit=edit)
+                        hook_fn = partial(editing_hook, pos=attr_pos, head=h, edit=edit)
                         hooks.append((hook_name, hook_fn))
 
                     if verbose:
-                        print(f"Hooking L{l}H{h} {component_name} at position {var_pos}")
+                        print(f"Hooking L{l}H{h} {component_name} at position {attr_pos}")
    
         for l in range(self.model.cfg.n_layers):
             pos_dict = {}
@@ -364,9 +420,93 @@ class IOICircuit(TransformerCircuit):
                     hooks.append((hook_name, partial(editing_hook, pos=pos, edit=feature_vector)))
 
         with torch.no_grad():
-            reconstructed_logits = self.model.run_with_hooks(tokens, fwd_hooks=hooks)
+            reconstructed_logits = self.model.run_with_hooks(prompt.tokens, fwd_hooks=hooks)
 
         return logits, reconstructed_logits
+
+    def get_activations(self, batch_size: int = 64):
+        if not hasattr(self, 'task_df'):
+            print("Task dataframe not found. Creating task dataframe...")
+            self.create_task_df()
+
+        activations = {i: [] for i in ['q', 'k', 'v', 'z']}
+
+        for b in tqdm(range(0, len(self.task_df), batch_size)):
+            tokens = self.model.to_tokens(self.task_df.iloc[b:b+batch_size, 0])
+
+            positions = self.task_df.iloc[b:b+batch_size][['IO_pos', 'S1_pos', 'S1+1_pos', 'S2_pos', 'END']].values
+            
+            with torch.no_grad():
+                _, cache = self.model.run_with_cache(tokens)
+
+            for key in activations.keys():
+                key_acts = cache.stack_activation(key) # [l b pos h dm]
+                activations[key].append(torch.cat([key_acts[:, None, i, pos] for i, pos in enumerate(positions)], dim=1))
+
+            del cache
+
+        self.activations = {}
+        self.avg_activations = {}
+        attributes = ['IO', 'S1', 'S1+1', 'S2', 'END']
+
+        for key in activations.keys():
+            key_acts = torch.cat(activations[key], 1).cpu() # [l N 5 h dm]
+            self.activations[key] = {a: key_acts[:, :, i] for i, a in enumerate(attributes)} # [l N h dm]
+            self.avg_activations[key] = {a: key_acts[:, :, i].mean(1) for i, a in enumerate(attributes)} # [l h dm]
+
+    def compute_supervised_dictionary(self):
+
+        if not hasattr(self, 'activations'):
+            print("Activations not found. Computing activations...")
+            self.get_activations()
+    
+        io_vec = {}
+        s_vec = {}
+
+        unique_io = self.task_df['IO'].unique()
+        unique_s = self.task_df['S'].unique()
+        
+        centered_activations = {}
+        for c in ['q', 'k', 'v', 'z']:
+            c_acts = {}
+            for attr in self.activations[c]:
+                c_acts[attr] = self.activations[c][attr] - self.avg_activations[c][attr][:, None]
+            centered_activations[c] = c_acts
+    
+
+        for name in tqdm(set(unique_io) | set(unique_s)):
+            io_vec[name] = {}
+            s_vec[name] = {}
+
+            for c in ['q', 'k', 'v', 'z']:
+                mask = torch.tensor(self.task_df['IO'] == name, dtype=torch.bool, device='cpu')
+                if mask.any():
+                    io_vec[name][c] = {attr: centered_activations[c][attr][:, mask].mean(1) for attr in self.activations[c]}
+                
+                mask = torch.tensor(self.task_df['S'] == name, dtype=torch.bool, device='cpu')
+                if mask.any():
+                    s_vec[name][c] = {attr: centered_activations[c][attr][:, mask].mean(1) for attr in self.activations[c]}
+
+        # POS
+        pos_vec = {'ABB': {}, 'BAB': {}}
+        
+        for c in ['q', 'k', 'v', 'z']:
+            for pos in pos_vec.keys():
+                mask = torch.tensor(self.task_df['POS'] == pos, dtype=torch.bool, device='cpu')
+                if mask.any():
+                    pos_vec[pos][c] = {attr: centered_activations[c][attr][:, mask].mean(1) for attr in self.activations[c]}
+        
+        self.IO_features = io_vec
+        self.S_features = s_vec
+        self.POS_features = pos_vec
+    
+    def get_supervised_feature(self, attribute, component, position, name=None):
+        if attribute == 'IO':
+            return self.IO_features[name][component][position]
+        elif attribute == 'S':
+            return self.S_features[name][component][position]
+        elif attribute == 'POS':
+            return self.POS_features[name][component][position] # [l h dh]
 
 
 # Feature search functions

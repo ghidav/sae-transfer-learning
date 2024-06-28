@@ -1,11 +1,12 @@
-import torch
-import pandas as pd
 from sae_lens import HookedSAETransformer
 from tqdm import tqdm
 import json
+import os
+import pandas as pd
 
-from circuit import IOICircuit
-from tasks.ioi.dictionary import supervised_dictionary
+os.environ["HF_HOME"] = "/workspace/huggingface"
+
+from circuit import IOICircuit, IOIPrompt
 
 device = "cuda"
 
@@ -49,31 +50,13 @@ ioi_circuit = IOICircuit(
 ioi_circuit.load_saes('z')
 ioi_circuit.load_saes('resid_pre')
 
-# Compute supervised dictionary
-bs = 64
-prompts = [p['prompt'] for p in prompts]
-activations = {i: [] for i in ['q', 'k', 'v', 'z']}
-for b in tqdm(range(0, len(prompts), bs)):
-    tokens = model.to_tokens(prompts[b:b+bs])
+ioi_circuit.compute_supervised_dictionary()
+
+all_nodes_labels = ['bNMH-q', 'bNMH-qk'] #['IH+DTH-z', 'SIH-v', 'SIH-z', 'bNMH-q', 'bNMH-qk', 'bNMH-z']
+all_nodes = [['bNMH.q'], ['bNMH.qk']] #[['IH.z', 'DTH.z'], ['SIH.v'], ['SIH.z'], ['bNMH.q'], ['bNMH.qk'], ['bNMH.z']]
+
+for node_names, node_label in zip(all_nodes, all_nodes_labels):
     
-    with torch.no_grad():
-        _, cache = model.run_with_cache(tokens)
-
-    for key in activations.keys():
-        activations[key].append(cache.stack_activation(key).cpu())
-
-    del cache
-
-activations = {key: torch.cat(values, 1) for key, values in activations.items()}
-mean_activations = {key: torch.mean(values, 1) for key, values in activations.items()} # [l pos h dm]
-task_df = ioi_circuit.create_task_df()
-io_vec, s_vec, pos_vec = supervised_dictionary(task_df, activations)
-
-all_nodes_labels = ['IH+DTH-z', 'SIH-v', 'SIH-z', 'bNMH-q', 'bNMH-qk', 'bNMH-z']
-all_nodes = [['IH.z', 'DTH.z'], ['SIH.v'], ['SIH.z'], ['bNMH.q'], ['bNMH.qk'], ['bNMH.z']]
-attributes = ['S', 'S', 'S', 'IO', 'IO', 'IO']
-
-for node_names, node_label, attribute in zip(all_nodes, all_nodes_labels, attributes):
     scores_df = {
         'clean_ld': [],
         'supervised_full_ld': [],
@@ -85,43 +68,22 @@ for node_names, node_label, attribute in zip(all_nodes, all_nodes_labels, attrib
 
     for idx in tqdm(range(512)):
 
-        example = prompts[idx]
-        str_tokens = model.to_str_tokens(example['prompt'])
-
-        io_pos = example['variables']['IO']
-        s_pos = example['variables']['S2']
-
-        io = str_tokens[io_pos]
-        s = str_tokens[s_pos]
-
-        pos = example['variables']['POS']
-        neg_pos = 'ABB' if pos == 'BAB' else 'BAB'
-
-        pos_id = 0 if pos == 'ABB' else 1
+        example = IOIPrompt(prompts[idx])
+        example.tokenize(model)
+        io = example.get_variable('IO')
+        s = example.get_variable('S')
 
         ### SUPERVISED DICTIONARY - FULL
-        all_features = []
-        for node in node_names:
-            if attribute == 'IO':
-                features = s_vec[pos][io[1:]]
-            elif attribute == 'S':
-                features = s_vec[pos][s[1:]]
-            else:
-                features = pos_vec[pos]
-
-            all_features.append(features)
-
         clean_logits, patched_logits = ioi_circuit.run_with_reconstruction(
             example, 
             node_names=node_names,
             method='supervised',
-            features=all_features,
             reconstruction='full',
             verbose=False
             )
 
-        scores_df['clean_ld'].append(logits_diff(clean_logits, ' '+io, ' '+s).item())
-        scores_df['supervised_full_ld'].append(logits_diff(patched_logits, ' '+io, ' '+s).item())
+        scores_df['clean_ld'].append(logits_diff(clean_logits, io, s).item())
+        scores_df['supervised_full_ld'].append(logits_diff(patched_logits, io, s).item())
 
         ### SAE FEATURES - FULL
         clean_logits, patched_logits = ioi_circuit.run_with_reconstruction(
@@ -132,31 +94,18 @@ for node_names, node_label, attribute in zip(all_nodes, all_nodes_labels, attrib
             verbose=False
             )
     
-        scores_df['sae_full_ld'].append(logits_diff(patched_logits, ' '+io, ' '+s).item())
+        scores_df['sae_full_ld'].append(logits_diff(patched_logits, io, s).item())
 
         ### SUPERVISED DICTIONARY - AVERAGE
-        all_features = []
-        for node in node_names:
-            if attribute == 'IO':
-                features = s_vec[pos][io]
-            elif attribute == 'S':
-                features = s_vec[pos][s]
-            else:
-                features = pos_vec[pos]
-
-            all_features.append(features)
-
         clean_logits, patched_logits = ioi_circuit.run_with_reconstruction(
             example, 
             node_names=node_names,
             method='supervised',
-            features=all_features,
             reconstruction='average',
-            averages=mean_activations,
             verbose=False
             )
 
-        scores_df['supervised_average_ld'].append(logits_diff(patched_logits, ' '+io, ' '+s).item())
+        scores_df['supervised_average_ld'].append(logits_diff(patched_logits, io, s).item())
 
         ### SAE FEATURES - AVERAGE
         clean_logits, patched_logits = ioi_circuit.run_with_reconstruction(
@@ -164,11 +113,10 @@ for node_names, node_label, attribute in zip(all_nodes, all_nodes_labels, attrib
             node_names=node_names,
             method='sae',
             reconstruction='average',
-            averages=mean_activations,
             verbose=False
             )
     
-        scores_df['sae_average_ld'].append(logits_diff(patched_logits, ' '+io, ' '+s).item())
+        scores_df['sae_average_ld'].append(logits_diff(patched_logits, io, s).item())
 
         ### ABLATION
         clean_logits, patched_logits = ioi_circuit.run_with_reconstruction(
@@ -176,11 +124,10 @@ for node_names, node_label, attribute in zip(all_nodes, all_nodes_labels, attrib
             node_names=node_names,
             method='ablation',
             reconstruction='average',
-            averages=mean_activations,
             verbose=False
             )
     
-        scores_df['ablation_ld'].append(logits_diff(patched_logits, ' '+io, ' '+s).item())
+        scores_df['ablation_ld'].append(logits_diff(patched_logits, io, s).item())
 
     scores_df = pd.DataFrame(scores_df)
-    scores_df.to_json(f'tasks/ioi/sn-scores/{attribute}_{node_label}.json')
+    scores_df.to_json(f'tasks/ioi/sn-scores/{node_label}.json')

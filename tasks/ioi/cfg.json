@@ -1,9 +1,9 @@
 {
     "name": "IOI",
     "templates": [
-        "{IO} and {S1} had a long and really crazy argument. Afterwards, {S2} said to",
-        "{IO} and {S1} had lots of fun at the {place}. {S2} gave a {object} to",
-        "{IO} and {S1} were working at the {place}. {S2} decided to give a {object} to"
+        "[IO] and [S1] had a long and really crazy argument. Afterwards, [S2] said to",
+        "[IO] and [S1] had lots of fun at the [place]. [S2] gave a [object] to",
+        "[IO] and [S1] were working at the [place]. [S2] decided to give a [object] to"
     ],
     "variables": [
         {
@@ -34,8 +34,8 @@
                 "2.2",
                 "4.11"
             ],
-            "q": "{S1}+1",
-            "kv": "{S1}"
+            "q": "S1+1",
+            "kv": "S1"
         },
         {
             "name": "DTH",
@@ -44,8 +44,8 @@
                 "3.0",
                 "0.10"
             ],
-            "q": "{S2}",
-            "kv": "{S1}"
+            "q": "S2",
+            "kv": "S1"
         },
         {
             "name": "IH",
@@ -55,8 +55,8 @@
                 "5.8",
                 "5.9"
             ],
-            "q": "{S2}",
-            "kv": "{S1}+1"
+            "q": "S2",
+            "kv": "S1+1"
         },
         {
             "name": "SIH",
@@ -66,8 +66,8 @@
                 "8.6",
                 "8.10"
             ],
-            "q": "{END}",
-            "kv": "{S2}"
+            "q": "END",
+            "kv": "S2"
         },
         {
             "name": "nNMH",
@@ -75,8 +75,8 @@
                 "10.7",
                 "11.10"
             ],
-            "q": "{END}",
-            "kv": "{IO}"
+            "q": "END",
+            "kv": "IO"
         },
         {
             "name": "NMH",
@@ -85,8 +85,8 @@
                 "9.9",
                 "10.0"
             ],
-            "q": "{END}",
-            "kv": "{IO}"
+            "q": "END",
+            "kv": "IO"
         },
         {
             "name": "bNMH",
@@ -100,8 +100,8 @@
                 "11.2",
                 "11.9"
             ],
-            "q": "{END}",
-            "kv": "{IO}"
+            "q": "END",
+            "kv": "IO"
         }
     ]
 }
