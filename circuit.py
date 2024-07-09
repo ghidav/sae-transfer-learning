@@ -1,5 +1,6 @@
 # Base class for circuits
 import re
+import os
 from functools import partial
 import random
 import torch
@@ -10,6 +11,7 @@ from tqdm import tqdm
 from typing import Dict, List, Optional, Tuple, Union
 from hooks import patching_hook, feature_patching_hook, editing_hook
 import json
+import time
 
 with open('tasks/ioi/names.json') as f:
     NAMES = json.load(f)
@@ -17,7 +19,8 @@ with open('tasks/ioi/names.json') as f:
 DEVICE = 'cuda'
 
 class IOIPrompt:
-    def __init__(self, prompt):
+    def __init__(self, prompt, id):
+        self.id = id
         self.text = prompt['prompt']
         self.variables = prompt['variables']
 
@@ -134,7 +137,7 @@ class TransformerCircuit:
 class IOICircuit(TransformerCircuit):
     def __init__(self, model, cfg, prompts, names):
         super().__init__(model, cfg)
-        self.prompts = [IOIPrompt(p) for p in prompts]
+        self.prompts = [IOIPrompt(p, id=i) for i, p in enumerate(prompts)]
         self.names = names
         self.components = ['q', 'k', 'v', 'z']
 
@@ -311,6 +314,7 @@ class IOICircuit(TransformerCircuit):
             prompt: IOIPrompt,
             method: str,
             node_names: List[str],
+            cache: Dict[str, torch.Tensor],
             reconstruction: str = 'full',
             verbose: bool = False
         ) -> Tuple[Optional[str], torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
@@ -329,14 +333,17 @@ class IOICircuit(TransformerCircuit):
         """
 
         if verbose: 
-            print(f"Prompt: {prompt.text}")
+            print(f"Prompt: {prompt.text}\nCaching activations...")
+
+        if method == 'ablation':
+            reconstruction = 'necessity'
 
         # Get logits and cache
-        with torch.no_grad():
-            logits, cache = self.model.run_with_cache(prompt.tokens)
+        #with torch.no_grad():
+        #    logits, cache = self.model.run_with_cache(prompt.tokens)
 
         hooks = []
-        z_vectors = [[] for _ in range(self.model.cfg.n_layers)]
+        z_vectors = torch.zeros((1, self.model.cfg.n_layers, prompt.tokens.shape[-1], self.model.cfg.d_model), device=DEVICE) # [1 l p dm]
 
         # Iterate over the nodes
         for i, name in enumerate(node_names):
@@ -354,37 +361,52 @@ class IOICircuit(TransformerCircuit):
                     l, h = map(int, head.split('.'))
                     hook_name = utils.get_act_name(component_name, l)
 
+                    acts = cache[hook_name][:, attr_pos, h] # [1 dh]
+
+                    """
+                    Reconstruction
+                    Z - Sufficency: o' = o + (f_h - z_h) @ W_O_h = f_h @ W_O_h
+                    Z -  Necessity: o' = o + (z_bar_h - f_h) @ W_O_h
+                    Z -   Ablation: o' = o + (z_bar_h - z_h) @ W_O_h
+                    Supervised reconstructs f_h while SAE reconstructs f_h @ W_O_h
+                    
+                    QKV - Sufficency: a_h' = a_h + (f_h - a_h) = f_h
+                    QKV - Necessity: a_h' = a_h + (a_bar_h - f_h)
+                    QKV -  Ablation: a_h' = a_h + (a_bar_h - a_h)
+                    Supervised reconstructs f_h while SAE reconstructs x_pre, from which f_h is extracted as f_h = x @ W_A_h 
+                    (with A in {Q, K, V})
+                    """
+
                     if component_name == "z":
-                        z = cache[hook_name][:, attr_pos, h] # [1 dh]
-                        zW = torch.matmul(z, self.model.W_O[l, h]) # [1 dm]
-                        if reconstruction == 'average':
+                        W = self.model.W_O[l, h] # [dh dm]
+                        #b = self.model.b_O[l, None] # [1 dm]
+                        zW = torch.matmul(acts, W) # [1 dm]
+                        if reconstruction == 'necessity':
                             z_bar = self.avg_activations[component_name][full_attr][None, l, h].to(DEVICE) # [1 dh]
-                            z_barW = torch.matmul(z_bar, self.model.W_O[l, h]) # [1 dm]
+                            z_barW = torch.matmul(z_bar, W) # [1 dm]
                         
                         if method == 'supervised':
                             f = self.get_supervised_feature(attribute='IO', name=prompt.get_variable('IO'), component=component_name, position=full_attr)
                             f += self.get_supervised_feature(attribute='S', name=prompt.get_variable('S'), component=component_name, position=full_attr)
                             f += self.get_supervised_feature(attribute='POS', name=prompt.get_variable('POS'), component=component_name, position=full_attr) # [l h dm]
                             
-                            fW = torch.matmul(f[None, l, h].to(DEVICE), self.model.W_O[l, h]) # [1 dm]
-                            edit = fW - zW if reconstruction == 'full' else z_barW - fW
+                            fW = torch.matmul(f[None, l, h].to(DEVICE), W) # [1 dm]
+                            edit = fW - zW if reconstruction == 'sufficency' else z_barW - fW
                         elif method == 'sae':
                             sae = self.saes[hook_name] 
                             fW = sae(zW) # [1 dm]
-                            edit = fW - zW if reconstruction == 'full' else z_barW - fW
+                            edit = fW - zW if reconstruction == 'sufficency' else z_barW - fW
                         elif method == 'ablation':
                             edit = z_barW - zW
                         
-                        z_vectors[l].append((attr_pos, edit))
+                        z_vectors[:, l, attr_pos] += edit
 
                     else:
                         if method == 'ablation':
-                            acts = cache[hook_name][:, attr_pos, h] # [1 dh]
                             acts_bar = self.avg_activations[component_name][full_attr][None, l, h].to(DEVICE) # [1 dh]
                             edit = acts_bar - acts
                         else:
                             if method == 'supervised':
-                                acts = cache[hook_name][:, attr_pos, h] # [1 dh]
                                 fW = self.get_supervised_feature(attribute='IO', name=prompt.get_variable('IO'), component=component_name, position=full_attr)
                                 fW += self.get_supervised_feature(attribute='S', name=prompt.get_variable('S'), component=component_name, position=full_attr)
                                 fW += self.get_supervised_feature(attribute='POS', name=prompt.get_variable('POS'), component=component_name, position=full_attr) # [l h dm]
@@ -393,41 +415,48 @@ class IOICircuit(TransformerCircuit):
                             elif method == 'sae':
                                 acts = cache[utils.get_act_name('resid_pre', l)][:, attr_pos] # [1 dm]
                                 sae = self.saes[utils.get_act_name('resid_pre', l)]
-                                f = sae(acts) # [1 dm]
-                                W = getattr(self.model, f'W_{component_name.upper()}')[l, h]
+                                with torch.no_grad():
+                                    f = sae(acts) # [1 dm]
+                                    f = self.model.blocks[l].ln1(f) # [1 dm]
+                                    acts = self.model.blocks[l].ln1(acts) # [1 dm]
+                                W = getattr(self.model, f'W_{component_name.upper()}')[l, h] # [dm dh]
+                                #b = getattr(self.model, f'b_{component_name.upper()}')[l, h, None] # [1 dh]
                                 fW = torch.matmul(f, W) # [1 dh]
                                 acts = torch.matmul(acts, W) # [1 dh]
                             
-                            if reconstruction == 'full':
+                            if reconstruction == 'sufficency':
                                 edit = fW - acts
-                            elif reconstruction == 'average':
+                            elif reconstruction == 'necessity':
                                 acts_bar = self.avg_activations[component_name][full_attr][None, l, h].to(DEVICE) # [1 dh]
-                                edit = acts_bar - fW
-
+                                edit = acts_bar - fW # [1 dh]
+                
                         hook_fn = partial(editing_hook, pos=attr_pos, head=h, edit=edit)
                         hooks.append((hook_name, hook_fn))
 
                     if verbose:
-                        print(f"Hooking L{l}H{h} {component_name} at position {attr_pos}")
+                        print(f"Hooking L{l}H{h} {component_name} ({full_attr}) at position {attr_pos}")
    
         for l in range(self.model.cfg.n_layers):
-            pos_dict = {}
             hook_name = utils.get_act_name('attn_out', l)
-            if z_vectors[l]:
-                for pos, feature_vector in z_vectors[l]:
-                    pos_dict[pos] = pos_dict.get(pos, 0) + feature_vector
-                for pos, feature_vector in pos_dict.items():
-                    hooks.append((hook_name, partial(editing_hook, pos=pos, edit=feature_vector)))
+            for pos in range(prompt.tokens.shape[-1]):
+                if z_vectors[:, l, pos].sum() != 0:
+                    hooks.append((hook_name, partial(editing_hook, pos=pos, edit=z_vectors[:, l, pos])))
 
         with torch.no_grad():
             reconstructed_logits = self.model.run_with_hooks(prompt.tokens, fwd_hooks=hooks)
 
-        return logits, reconstructed_logits
+        return reconstructed_logits
 
     def get_activations(self, batch_size: int = 64):
         if not hasattr(self, 'task_df'):
             print("Task dataframe not found. Creating task dataframe...")
             self.create_task_df()
+
+        if os.path.exists('tmp/activations.pt'):
+            print("Loading activations...")
+            self.activations = torch.load('tmp/activations.pt')
+            self.avg_activations = {k: {a: v.mean(1) for a, v in self.activations[k].items()} for k in self.activations.keys()}
+            return
 
         activations = {i: [] for i in ['q', 'k', 'v', 'z']}
 
@@ -441,7 +470,7 @@ class IOICircuit(TransformerCircuit):
 
             for key in activations.keys():
                 key_acts = cache.stack_activation(key) # [l b pos h dm]
-                activations[key].append(torch.cat([key_acts[:, None, i, pos] for i, pos in enumerate(positions)], dim=1))
+                activations[key].append(torch.cat([key_acts[:, None, i, pos] for i, pos in enumerate(positions)], dim=1).cpu())
 
             del cache
 
@@ -450,15 +479,25 @@ class IOICircuit(TransformerCircuit):
         attributes = ['IO', 'S1', 'S1+1', 'S2', 'END']
 
         for key in activations.keys():
-            key_acts = torch.cat(activations[key], 1).cpu() # [l N 5 h dm]
-            self.activations[key] = {a: key_acts[:, :, i] for i, a in enumerate(attributes)} # [l N h dm]
-            self.avg_activations[key] = {a: key_acts[:, :, i].mean(1) for i, a in enumerate(attributes)} # [l h dm]
+            key_acts = torch.cat(activations[key], 1).cpu() # [l N 5 h dh]
+            self.activations[key] = {a: key_acts[:, :, i] for i, a in enumerate(attributes)} # [l N h dh]
+            self.avg_activations[key] = {k: v.mean(1) for k, v in self.activations[key].items()} # [l h dh]
+
+        print("Activations computed. Saving activations...")
+        torch.save(self.activations, 'tmp/activations.pt')
 
     def compute_supervised_dictionary(self):
 
         if not hasattr(self, 'activations'):
             print("Activations not found. Computing activations...")
             self.get_activations()
+
+        if os.path.exists('tmp/io_features.pt') and os.path.exists('tmp/s_features.pt') and os.path.exists('tmp/pos_features.pt'):
+            print("Loading supervised dictionaries...")
+            self.IO_features = torch.load('tmp/io_features.pt')
+            self.S_features = torch.load('tmp/s_features.pt')
+            self.POS_features = torch.load('tmp/pos_features.pt')
+            return
     
         io_vec = {}
         s_vec = {}
@@ -466,6 +505,7 @@ class IOICircuit(TransformerCircuit):
         unique_io = self.task_df['IO'].unique()
         unique_s = self.task_df['S'].unique()
         
+        print("Computing supervised dictionary...")
         centered_activations = {}
         for c in ['q', 'k', 'v', 'z']:
             c_acts = {}
@@ -499,6 +539,12 @@ class IOICircuit(TransformerCircuit):
         self.IO_features = io_vec
         self.S_features = s_vec
         self.POS_features = pos_vec
+
+        # Save dictionaries
+        print("Dictionaries computed. Saving supervised dictionaries...")
+        torch.save(io_vec, 'tmp/io_features.pt')
+        torch.save(s_vec, 'tmp/s_features.pt')
+        torch.save(pos_vec, 'tmp/pos_features.pt')
     
     def get_supervised_feature(self, attribute, component, position, name=None):
         if attribute == 'IO':

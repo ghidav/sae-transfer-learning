@@ -2,7 +2,10 @@ from sae_lens import HookedSAETransformer
 from tqdm import tqdm
 import json
 import os
+import torch
 import pandas as pd
+
+import time
 
 os.environ["HF_HOME"] = "/workspace/huggingface"
 
@@ -36,6 +39,7 @@ with open('tasks/ioi/prompts.json') as f:
 with open('tasks/ioi/names.json') as f:
     names = json.load(f)
 
+print(f"N. prompts: {len(prompts)}")
 
 # Load model and SAEs
 model: HookedSAETransformer = HookedSAETransformer.from_pretrained("gpt2").to(device)
@@ -52,8 +56,8 @@ ioi_circuit.load_saes('resid_pre')
 
 ioi_circuit.compute_supervised_dictionary()
 
-all_nodes_labels = ['bNMH-q', 'bNMH-qk'] #['IH+DTH-z', 'SIH-v', 'SIH-z', 'bNMH-q', 'bNMH-qk', 'bNMH-z']
-all_nodes = [['bNMH.q'], ['bNMH.qk']] #[['IH.z', 'DTH.z'], ['SIH.v'], ['SIH.z'], ['bNMH.q'], ['bNMH.qk'], ['bNMH.z']]
+all_nodes_labels = ['bNMH-q', 'bNMH-qk', 'IH+DTH-z', 'SIH-v', 'SIH-z', 'bNMH-z']
+all_nodes = [['bNMH.q'], ['bNMH.qk'], ['IH.z', 'DTH.z'], ['SIH.v'], ['SIH.z'], ['bNMH.z']]
 
 for node_names, node_label in zip(all_nodes, all_nodes_labels):
     
@@ -66,68 +70,78 @@ for node_names, node_label in zip(all_nodes, all_nodes_labels):
         'ablation_ld': []
     }
 
-    for idx in tqdm(range(512)):
+    for idx in tqdm(range(64)):
+        try:
+            example = IOIPrompt(prompts[idx], id=idx)
+            example.tokenize(model)
+            io = example.get_variable('IO')
+            s = example.get_variable('S')
 
-        example = IOIPrompt(prompts[idx])
-        example.tokenize(model)
-        io = example.get_variable('IO')
-        s = example.get_variable('S')
+            # Get clean logits
+            with torch.no_grad():
+                clean_logits, clean_cache = ioi_circuit.model.run_with_cache(example.tokens)
 
-        ### SUPERVISED DICTIONARY - FULL
-        clean_logits, patched_logits = ioi_circuit.run_with_reconstruction(
-            example, 
-            node_names=node_names,
-            method='supervised',
-            reconstruction='full',
-            verbose=False
-            )
+            ### SUPERVISED DICTIONARY - FULL
+            patched_logits = ioi_circuit.run_with_reconstruction(
+                example, 
+                node_names=node_names,
+                method='supervised',
+                cache=clean_cache,
+                reconstruction='sufficency',
+                verbose=False
+                )
 
-        scores_df['clean_ld'].append(logits_diff(clean_logits, io, s).item())
-        scores_df['supervised_full_ld'].append(logits_diff(patched_logits, io, s).item())
+            scores_df['clean_ld'].append(logits_diff(clean_logits, io, s).item())
+            scores_df['supervised_full_ld'].append(logits_diff(patched_logits, io, s).item())
 
-        ### SAE FEATURES - FULL
-        clean_logits, patched_logits = ioi_circuit.run_with_reconstruction(
-            example, 
-            node_names=node_names,
-            method='sae',
-            reconstruction='full',
-            verbose=False
-            )
-    
-        scores_df['sae_full_ld'].append(logits_diff(patched_logits, io, s).item())
+            ### SAE FEATURES - FULL
+            patched_logits = ioi_circuit.run_with_reconstruction(
+                example, 
+                node_names=node_names,
+                method='sae',
+                cache=clean_cache,
+                reconstruction='sufficency',
+                verbose=False
+                )
+        
+            scores_df['sae_full_ld'].append(logits_diff(patched_logits, io, s).item())
 
-        ### SUPERVISED DICTIONARY - AVERAGE
-        clean_logits, patched_logits = ioi_circuit.run_with_reconstruction(
-            example, 
-            node_names=node_names,
-            method='supervised',
-            reconstruction='average',
-            verbose=False
-            )
+            ### SUPERVISED DICTIONARY - AVERAGE
+            patched_logits = ioi_circuit.run_with_reconstruction(
+                example, 
+                node_names=node_names,
+                method='supervised',
+                cache=clean_cache,
+                reconstruction='necessity',
+                verbose=False
+                )
 
-        scores_df['supervised_average_ld'].append(logits_diff(patched_logits, io, s).item())
+            scores_df['supervised_average_ld'].append(logits_diff(patched_logits, io, s).item())
 
-        ### SAE FEATURES - AVERAGE
-        clean_logits, patched_logits = ioi_circuit.run_with_reconstruction(
-            example, 
-            node_names=node_names,
-            method='sae',
-            reconstruction='average',
-            verbose=False
-            )
-    
-        scores_df['sae_average_ld'].append(logits_diff(patched_logits, io, s).item())
+            ### SAE FEATURES - AVERAGE
+            patched_logits = ioi_circuit.run_with_reconstruction(
+                example, 
+                node_names=node_names,
+                method='sae',
+                cache=clean_cache,
+                reconstruction='necessity',
+                verbose=False
+                )
+        
+            scores_df['sae_average_ld'].append(logits_diff(patched_logits, io, s).item())
 
-        ### ABLATION
-        clean_logits, patched_logits = ioi_circuit.run_with_reconstruction(
-            example, 
-            node_names=node_names,
-            method='ablation',
-            reconstruction='average',
-            verbose=False
-            )
-    
-        scores_df['ablation_ld'].append(logits_diff(patched_logits, io, s).item())
+            ### ABLATION
+            patched_logits = ioi_circuit.run_with_reconstruction(
+                example, 
+                node_names=node_names,
+                method='ablation',
+                cache=clean_cache,
+                verbose=False
+                )
+        
+            scores_df['ablation_ld'].append(logits_diff(patched_logits, io, s).item())
+        except Exception as e:
+            print(f"Error in {idx}: {e}")
 
     scores_df = pd.DataFrame(scores_df)
     scores_df.to_json(f'tasks/ioi/sn-scores/{node_label}.json')

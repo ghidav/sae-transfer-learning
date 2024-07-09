@@ -16,3 +16,10 @@ def editing_hook(x, hook, pos, edit, head=None):
         x[:, pos] = x[:, pos] + edit
     else:
         x[:, pos, head] = x[:, pos, head] + edit
+
+def ablation_hook(x, hook, pos, mean, head=None):
+    if head is None:
+        x[:, pos] = mean
+    else:
+        x[:, pos, head] = mean
+    return x
