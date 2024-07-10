@@ -6,12 +6,13 @@ import random
 import torch
 import pandas as pd
 from transformer_lens import utils
-from sae_lens import SAE
+from sae_lens import SAE, SAEConfig
 from tqdm import tqdm
 from typing import Dict, List, Optional, Tuple, Union
 from hooks import patching_hook, feature_patching_hook, editing_hook
 import json
 import time
+from safetensors import safe_open
 
 with open('tasks/ioi/names.json') as f:
     NAMES = json.load(f)
@@ -132,6 +133,25 @@ class TransformerCircuit:
                 device=device
             )
             self.saes[sae.cfg.hook_name] = sae
+    
+    def load_local_sae(self, path, device='cuda'):
+        with open(os.path.join(path, 'cfg.json')) as f:
+            cfg = json.load(f)
+
+        cfg['architecture'] = 'standard'
+        cfg['finetuning_scaling_factor'] = None
+        cfg['dataset_trust_remote_code'] = True
+        
+        sae = SAE(SAEConfig.from_dict(cfg)).to(device)
+
+        state_dict = {}
+        with safe_open(os.path.join(path, 'sae_weights.safetensors'), framework="pt", device=device) as f:  # type: ignore
+            for k in f.keys():
+                state_dict[k] = f.get_tensor(k)
+        del state_dict['scaling_factor']
+        sae.load_state_dict(state_dict)
+        self.saes[sae.cfg.hook_name] = sae
+
 
 # Class for IOI circuit
 class IOICircuit(TransformerCircuit):
@@ -393,9 +413,10 @@ class IOICircuit(TransformerCircuit):
                             fW = torch.matmul(f[None, l, h].to(DEVICE), W) # [1 dm]
                             edit = fW - zW if reconstruction == 'sufficency' else z_barW - fW
                         elif method == 'sae':
+                            z_concat = cache[hook_name][:, attr_pos] # [1 h dh]
                             sae = self.saes[hook_name] 
-                            fW = sae(zW) # [1 dm]
-                            edit = fW - zW if reconstruction == 'sufficency' else z_barW - fW
+                            fW = sae(z_concat.view(1, -1)).view(z_concat.shape) # [1 h dh] ############
+                            edit = fW[:, h] - zW if reconstruction == 'sufficency' else z_barW - fW[:, h]
                         elif method == 'ablation':
                             edit = z_barW - zW
                         

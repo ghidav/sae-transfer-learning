@@ -9,6 +9,21 @@ import time
 
 os.environ["HF_HOME"] = "/workspace/huggingface"
 
+PATHS = [
+    '/workspace/huggingface/hub/models--ghidav--gpt2-sae-attn-tl/snapshots/54777f8ad8197017c54157a34152ac4da3e7da1c/layer_0',
+    '/workspace/huggingface/hub/models--ghidav--gpt2-sae-attn-tl/snapshots/54777f8ad8197017c54157a34152ac4da3e7da1c/transfer_layer_1',
+    '/workspace/huggingface/hub/models--ghidav--gpt2-sae-attn-tl/snapshots/54777f8ad8197017c54157a34152ac4da3e7da1c/transfer_layer_2',
+    '/workspace/huggingface/hub/models--ghidav--gpt2-sae-attn-tl/snapshots/54777f8ad8197017c54157a34152ac4da3e7da1c/transfer_layer_3',
+    '/workspace/huggingface/hub/models--ghidav--gpt2-sae-attn-tl/snapshots/54777f8ad8197017c54157a34152ac4da3e7da1c/transfer_layer_4',
+    '/workspace/huggingface/hub/models--ghidav--gpt2-sae-attn-tl/snapshots/54777f8ad8197017c54157a34152ac4da3e7da1c/transfer_layer_5',
+    '/workspace/huggingface/hub/models--ghidav--gpt2-sae-attn-tl/snapshots/54777f8ad8197017c54157a34152ac4da3e7da1c/transfer_layer_6',
+    '/workspace/huggingface/hub/models--ghidav--gpt2-sae-attn-tl/snapshots/54777f8ad8197017c54157a34152ac4da3e7da1c/transfer_layer_7',
+    '/workspace/huggingface/hub/models--ghidav--gpt2-sae-attn-tl/snapshots/54777f8ad8197017c54157a34152ac4da3e7da1c/transfer_layer_8',
+    '/workspace/huggingface/hub/models--ghidav--gpt2-sae-attn-tl/snapshots/54777f8ad8197017c54157a34152ac4da3e7da1c/transfer_layer_9',
+    '/workspace/huggingface/hub/models--ghidav--gpt2-sae-attn-tl/snapshots/54777f8ad8197017c54157a34152ac4da3e7da1c/transfer_layer_10',
+    '/workspace/huggingface/hub/models--ghidav--gpt2-sae-attn-tl/snapshots/54777f8ad8197017c54157a34152ac4da3e7da1c/transfer_layer_11',
+]
+    
 from circuit import IOICircuit, IOIPrompt
 
 device = "cuda"
@@ -51,26 +66,29 @@ ioi_circuit = IOICircuit(
     prompts=prompts,
     names=names)
 
-ioi_circuit.load_saes('z')
 ioi_circuit.load_saes('resid_pre')
+ioi_circuit.load_saes('z')
+ioi_circuit.get_activations()
 
-ioi_circuit.compute_supervised_dictionary()
+#for path in PATHS:
+#    ioi_circuit.load_local_sae(path)
 
-all_nodes_labels = ['bNMH-q', 'bNMH-qk', 'IH+DTH-z', 'SIH-v', 'SIH-z', 'bNMH-z']
-all_nodes = [['bNMH.q'], ['bNMH.qk'], ['IH.z', 'DTH.z'], ['SIH.v'], ['SIH.z'], ['bNMH.z']]
+#all_nodes_labels = ['bNMH-q', 'bNMH-qk', 'IH+DTH-z', 'SIH-v', 'SIH-z', 'bNMH-z']
+#all_nodes = [['bNMH.q'], ['bNMH.qk'], ['IH.z', 'DTH.z'], ['SIH.v'], ['SIH.z'], ['bNMH.z']]
+
+all_nodes_labels = ['IH+DTH-z', 'SIH-z', 'bNMH-z']
+all_nodes = [['IH.z', 'DTH.z'], ['SIH.z'], ['bNMH.z']]
 
 for node_names, node_label in zip(all_nodes, all_nodes_labels):
     
     scores_df = {
         'clean_ld': [],
-        'supervised_full_ld': [],
         'sae_full_ld': [],
-        'supervised_average_ld': [],
         'sae_average_ld': [],
         'ablation_ld': []
     }
 
-    for idx in tqdm(range(64)):
+    for idx in tqdm(range(128)):
         try:
             example = IOIPrompt(prompts[idx], id=idx)
             example.tokenize(model)
@@ -81,18 +99,7 @@ for node_names, node_label in zip(all_nodes, all_nodes_labels):
             with torch.no_grad():
                 clean_logits, clean_cache = ioi_circuit.model.run_with_cache(example.tokens)
 
-            ### SUPERVISED DICTIONARY - FULL
-            patched_logits = ioi_circuit.run_with_reconstruction(
-                example, 
-                node_names=node_names,
-                method='supervised',
-                cache=clean_cache,
-                reconstruction='sufficency',
-                verbose=False
-                )
-
             scores_df['clean_ld'].append(logits_diff(clean_logits, io, s).item())
-            scores_df['supervised_full_ld'].append(logits_diff(patched_logits, io, s).item())
 
             ### SAE FEATURES - FULL
             patched_logits = ioi_circuit.run_with_reconstruction(
@@ -105,18 +112,6 @@ for node_names, node_label in zip(all_nodes, all_nodes_labels):
                 )
         
             scores_df['sae_full_ld'].append(logits_diff(patched_logits, io, s).item())
-
-            ### SUPERVISED DICTIONARY - AVERAGE
-            patched_logits = ioi_circuit.run_with_reconstruction(
-                example, 
-                node_names=node_names,
-                method='supervised',
-                cache=clean_cache,
-                reconstruction='necessity',
-                verbose=False
-                )
-
-            scores_df['supervised_average_ld'].append(logits_diff(patched_logits, io, s).item())
 
             ### SAE FEATURES - AVERAGE
             patched_logits = ioi_circuit.run_with_reconstruction(
@@ -144,4 +139,4 @@ for node_names, node_label in zip(all_nodes, all_nodes_labels):
             print(f"Error in {idx}: {e}")
 
     scores_df = pd.DataFrame(scores_df)
-    scores_df.to_json(f'tasks/ioi/sn-scores/{node_label}.json')
+    scores_df.to_json(f'tasks/ioi/sn-scores-standard/{node_label}.json')
