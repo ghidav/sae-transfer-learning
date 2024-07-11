@@ -14,7 +14,9 @@ import json
 import time
 from safetensors import safe_open
 
-with open('tasks/ioi/names.json') as f:
+PATH = "/workspace/sae-transfer-learning"
+
+with open(os.path.join(PATH, 'tasks/ioi/names.json')) as f:
     NAMES = json.load(f)
 
 DEVICE = 'cuda'
@@ -363,7 +365,6 @@ class IOICircuit(TransformerCircuit):
         #    logits, cache = self.model.run_with_cache(prompt.tokens)
 
         hooks = []
-        z_vectors = torch.zeros((1, self.model.cfg.n_layers, prompt.tokens.shape[-1], self.model.cfg.d_model), device=DEVICE) # [1 l p dm]
 
         # Iterate over the nodes
         for i, name in enumerate(node_names):
@@ -381,88 +382,53 @@ class IOICircuit(TransformerCircuit):
                     l, h = map(int, head.split('.'))
                     hook_name = utils.get_act_name(component_name, l)
 
-                    acts = cache[hook_name][:, attr_pos, h] # [1 dh]
+                    a_h = cache[hook_name][:, attr_pos, h] # [1 dh]
+                    a_h_bar = self.avg_activations[component_name][full_attr][None, l, h].to(DEVICE) # [1 dh]
 
                     """
-                    Reconstruction
-                    Z - Sufficency: o' = o + (f_h - z_h) @ W_O_h = f_h @ W_O_h
-                    Z -  Necessity: o' = o + (z_bar_h - f_h) @ W_O_h
-                    Z -   Ablation: o' = o + (z_bar_h - z_h) @ W_O_h
-                    Supervised reconstructs f_h while SAE reconstructs f_h @ W_O_h
-                    
-                    QKV - Sufficency: a_h' = a_h + (f_h - a_h) = f_h
-                    QKV - Necessity: a_h' = a_h + (a_bar_h - f_h)
-                    QKV -  Ablation: a_h' = a_h + (a_bar_h - a_h)
-                    Supervised reconstructs f_h while SAE reconstructs x_pre, from which f_h is extracted as f_h = x @ W_A_h 
+                    Reconstruction                    
+                    Sufficency: a_h' = a_h + (f_h - a_h) = f_h
+                    Necessity: a_h' = a_h + (a_h_bar - f_h)
+                    Ablation: a_h' = a_h + (a_h_bar - a_h)
+                    Supervised and SAE Z reconstructs f_h directly while SAE reconstructs x_pre, from which f_h is extracted as f_h = ln(x_pre) @ W_A_h 
                     (with A in {Q, K, V})
                     """
 
-                    if component_name == "z":
-                        W = self.model.W_O[l, h] # [dh dm]
-                        #b = self.model.b_O[l, None] # [1 dm]
-                        zW = torch.matmul(acts, W) # [1 dm]
-                        if reconstruction == 'necessity':
-                            z_bar = self.avg_activations[component_name][full_attr][None, l, h].to(DEVICE) # [1 dh]
-                            z_barW = torch.matmul(z_bar, W) # [1 dm]
+                    if method == 'supervised':
+                        f_h = self.get_supervised_feature(attribute='IO', name=prompt.get_variable('IO'), component=component_name, position=full_attr)
+                        f_h += self.get_supervised_feature(attribute='S', name=prompt.get_variable('S'), component=component_name, position=full_attr)
+                        f_h += self.get_supervised_feature(attribute='POS', name=prompt.get_variable('POS'), component=component_name, position=full_attr) # [l h dh]
+                        f_h = f_h[None, l, h].to(DEVICE) # [1 dh]
                         
-                        if method == 'supervised':
-                            f = self.get_supervised_feature(attribute='IO', name=prompt.get_variable('IO'), component=component_name, position=full_attr)
-                            f += self.get_supervised_feature(attribute='S', name=prompt.get_variable('S'), component=component_name, position=full_attr)
-                            f += self.get_supervised_feature(attribute='POS', name=prompt.get_variable('POS'), component=component_name, position=full_attr) # [l h dm]
-                            
-                            fW = torch.matmul(f[None, l, h].to(DEVICE), W) # [1 dm]
-                            edit = fW - zW if reconstruction == 'sufficency' else z_barW - fW
-                        elif method == 'sae':
+                        edit = f_h - a_h if reconstruction == 'sufficency' else a_h_bar - f_h
+                    
+                    elif method == 'sae':
+                        if component_name == "z":
                             z_concat = cache[hook_name][:, attr_pos] # [1 h dh]
-                            sae = self.saes[hook_name] 
-                            fW = sae(z_concat.view(1, -1)).view(z_concat.shape) # [1 h dh] ############
-                            edit = fW[:, h] - zW if reconstruction == 'sufficency' else z_barW - fW[:, h]
-                        elif method == 'ablation':
-                            edit = z_barW - zW
-                        
-                        z_vectors[:, l, attr_pos] += edit
-
-                    else:
-                        if method == 'ablation':
-                            acts_bar = self.avg_activations[component_name][full_attr][None, l, h].to(DEVICE) # [1 dh]
-                            edit = acts_bar - acts
+                            sae = self.saes[hook_name]
+                            with torch.no_grad():
+                                f = sae(z_concat.reshape(1, -1)).reshape(z_concat.shape) # [1 h dh]
+                            f_h = f[:, h] # [1 dh]
                         else:
-                            if method == 'supervised':
-                                fW = self.get_supervised_feature(attribute='IO', name=prompt.get_variable('IO'), component=component_name, position=full_attr)
-                                fW += self.get_supervised_feature(attribute='S', name=prompt.get_variable('S'), component=component_name, position=full_attr)
-                                fW += self.get_supervised_feature(attribute='POS', name=prompt.get_variable('POS'), component=component_name, position=full_attr) # [l h dm]
-                                fW = fW[None, l, h].to(DEVICE)
+                            x_pre = cache[utils.get_act_name('resid_pre', l)][:, attr_pos] # [1 dm]
+                            sae = self.saes[utils.get_act_name('resid_pre', l)]
+                            with torch.no_grad():
+                                x_pre_hat = sae(x_pre) # [1 dm]
+                                x_pre_hat_ln = self.model.blocks[l].ln1(x_pre_hat) # [1 dm]
+                            W = getattr(self.model, f'W_{component_name.upper()}')[l, h] # [dm dh]
+                            f_h = torch.matmul(x_pre_hat_ln, W) # [1 dh]
 
-                            elif method == 'sae':
-                                acts = cache[utils.get_act_name('resid_pre', l)][:, attr_pos] # [1 dm]
-                                sae = self.saes[utils.get_act_name('resid_pre', l)]
-                                with torch.no_grad():
-                                    f = sae(acts) # [1 dm]
-                                    f = self.model.blocks[l].ln1(f) # [1 dm]
-                                    acts = self.model.blocks[l].ln1(acts) # [1 dm]
-                                W = getattr(self.model, f'W_{component_name.upper()}')[l, h] # [dm dh]
-                                #b = getattr(self.model, f'b_{component_name.upper()}')[l, h, None] # [1 dh]
-                                fW = torch.matmul(f, W) # [1 dh]
-                                acts = torch.matmul(acts, W) # [1 dh]
-                            
-                            if reconstruction == 'sufficency':
-                                edit = fW - acts
-                            elif reconstruction == 'necessity':
-                                acts_bar = self.avg_activations[component_name][full_attr][None, l, h].to(DEVICE) # [1 dh]
-                                edit = acts_bar - fW # [1 dh]
-                
-                        hook_fn = partial(editing_hook, pos=attr_pos, head=h, edit=edit)
-                        hooks.append((hook_name, hook_fn))
+                        edit = f_h - a_h if reconstruction == 'sufficency' else a_h_bar - f_h
+                    
+                    elif method == 'ablation':
+                        edit = a_h_bar - a_h
+
+                    hook_fn = partial(editing_hook, pos=attr_pos, head=h, edit=edit)
+                    hooks.append((hook_name, hook_fn))
 
                     if verbose:
                         print(f"Hooking L{l}H{h} {component_name} ({full_attr}) at position {attr_pos}")
    
-        for l in range(self.model.cfg.n_layers):
-            hook_name = utils.get_act_name('attn_out', l)
-            for pos in range(prompt.tokens.shape[-1]):
-                if z_vectors[:, l, pos].sum() != 0:
-                    hooks.append((hook_name, partial(editing_hook, pos=pos, edit=z_vectors[:, l, pos])))
-
         with torch.no_grad():
             reconstructed_logits = self.model.run_with_hooks(prompt.tokens, fwd_hooks=hooks)
 
@@ -473,9 +439,9 @@ class IOICircuit(TransformerCircuit):
             print("Task dataframe not found. Creating task dataframe...")
             self.create_task_df()
 
-        if os.path.exists('tmp/activations.pt'):
+        if os.path.exists(os.path.join(PATH, 'tmp/activations.pt')):
             print("Loading activations...")
-            self.activations = torch.load('tmp/activations.pt')
+            self.activations = torch.load(os.path.join(PATH, 'tmp/activations.pt'))
             self.avg_activations = {k: {a: v.mean(1) for a, v in self.activations[k].items()} for k in self.activations.keys()}
             return
 
@@ -505,7 +471,7 @@ class IOICircuit(TransformerCircuit):
             self.avg_activations[key] = {k: v.mean(1) for k, v in self.activations[key].items()} # [l h dh]
 
         print("Activations computed. Saving activations...")
-        torch.save(self.activations, 'tmp/activations.pt')
+        torch.save(self.activations, os.path.join(PATH, 'tmp/activations.pt'))
 
     def compute_supervised_dictionary(self):
 

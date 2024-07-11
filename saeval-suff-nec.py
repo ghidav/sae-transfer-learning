@@ -24,7 +24,7 @@ PATHS = [
     '/workspace/huggingface/hub/models--ghidav--gpt2-sae-attn-tl/snapshots/54777f8ad8197017c54157a34152ac4da3e7da1c/transfer_layer_11',
 ]
     
-from circuit import IOICircuit, IOIPrompt
+from circuit import IOICircuit, IOIPrompt, PATH
 
 device = "cuda"
 
@@ -45,13 +45,13 @@ def logits_score(clean_logits, patched_logits, corr_logits, correct_answer, inco
     return score
 
 # Load task
-with open('tasks/ioi/cfg.json') as f:
+with open(os.path.join(PATH, 'tasks/ioi/cfg.json')) as f:
     cfg = json.load(f)
 
-with open('tasks/ioi/prompts.json') as f:
+with open(os.path.join(PATH, 'tasks/ioi/prompts.json')) as f:
     prompts = json.load(f)
 
-with open('tasks/ioi/names.json') as f:
+with open(os.path.join(PATH, 'tasks/ioi/names.json')) as f:
     names = json.load(f)
 
 print(f"N. prompts: {len(prompts)}")
@@ -88,7 +88,7 @@ for node_names, node_label in zip(all_nodes, all_nodes_labels):
         'ablation_ld': []
     }
 
-    for idx in tqdm(range(128)):
+    for idx in tqdm(range(256)):
         try:
             example = IOIPrompt(prompts[idx], id=idx)
             example.tokenize(model)
@@ -139,4 +139,4 @@ for node_names, node_label in zip(all_nodes, all_nodes_labels):
             print(f"Error in {idx}: {e}")
 
     scores_df = pd.DataFrame(scores_df)
-    scores_df.to_json(f'tasks/ioi/sn-scores-standard/{node_label}.json')
+    scores_df.to_json(os.path.join(PATH, f'tasks/ioi/sn-scores-standard/{node_label}.json'))
