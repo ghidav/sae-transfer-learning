@@ -1,5 +1,4 @@
-transformer-lens==1.10.0
-transformers==4.35.2
+git+https://github.com/jbloomAus/SAELens.git
 jupyter==1.0.0
 plotly==5.18.0
 plotly-express==0.4.1
@@ -14,4 +13,3 @@ pytest==7.4.3
 pytest-cov==4.1.0
 pre-commit==3.6.0
 seaborn==0.13.2
-git+https://github.com/jbloomAus/SAELens.git

@@ -16,7 +16,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ['HF_HOME'] = '/workspace/huggingface'
 
 training_tokens = 2_000_000_000
-batch_size = 4
+batch_size = 4096
 
 total_training_steps = training_tokens // batch_size
 
@@ -49,9 +49,9 @@ for i in range(0, 6):
         apply_b_dec_to_input = False,
 
         # Activation Store Parameters
-        n_batches_in_buffer = 64,
-        training_tokens = 2_000_000_000,
-        store_batch_size_prompts = 128,
+        n_batches_in_buffer = 128,
+        training_tokens = training_tokens,
+        store_batch_size_prompts = 16,
         train_batch_size_tokens = batch_size,
         normalize_activations = (
             "none"  # none, expected_average_only_in (Anthropic April Update), constant_norm_rescale (Anthropic Feb Update)
@@ -71,7 +71,7 @@ for i in range(0, 6):
 
         ## Loss Function
         mse_loss_normalization = None,
-        l1_coefficient = 1e-4,
+        l1_coefficient = 1,
         lp_norm = 1,
         scale_sparsity_penalty_by_decoder_norm = False,
         l1_warm_up_steps = l1_warm_up_steps,
