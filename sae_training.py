@@ -36,7 +36,7 @@ l1_warm_up_steps = total_training_steps // 20  # 5% of training
 cfg = LanguageModelSAERunnerConfig(
     
     # Data Generating Function (Model + Training Distibuion)
-    model_name = "EleutherAI/pythia-70m-deduped",
+    model_name = "pythia-160m",
     hook_name = f"blocks.{args.layer}.{args.component}",
     hook_layer = args.layer,
     dataset_path = "NeelNanda/pile-small-tokenized-2b",
@@ -46,7 +46,7 @@ cfg = LanguageModelSAERunnerConfig(
 
     # SAE Parameters
     architecture = "jumprelu",
-    d_in = 512,
+    d_in = 768,
     d_sae = None,
     b_dec_init_method = "zeros",
     expansion_factor = 8,
@@ -58,14 +58,14 @@ cfg = LanguageModelSAERunnerConfig(
     # Activation Store Parameters
     n_batches_in_buffer = 128,
     training_tokens = training_tokens,
-    store_batch_size_prompts = 12,
+    store_batch_size_prompts = 8,
     train_batch_size_tokens = batch_size,
     normalize_activations = (
         "none"  # none, expected_average_only_in (Anthropic April Update), constant_norm_rescale (Anthropic Feb Update)
     ),
 
     # Misc
-    device = "cuda",
+    device = device,
     seed = 42,
     dtype = "float32",
     prepend_bos = False,
@@ -84,7 +84,7 @@ cfg = LanguageModelSAERunnerConfig(
     l1_warm_up_steps = l1_warm_up_steps,
 
     ## Learning Rate Schedule
-    lr = 7e-5,
+    lr = 3e-5,
     lr_scheduler_name = (
         "constant"  # constant, cosineannealing, cosineannealingwarmrestarts
     ),
@@ -114,7 +114,7 @@ cfg = LanguageModelSAERunnerConfig(
 
     # Misc
     resume = False,
-    n_checkpoints = 0,
+    n_checkpoints = 10,
     checkpoint_path = "checkpoints",
     verbose = True
 )
