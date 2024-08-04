@@ -15,7 +15,7 @@ else:
 argparser = argparse.ArgumentParser()
 argparser.add_argument("-l", "--layer", type=int)
 argparser.add_argument("-c", "--component", type=str)
-argparser.add_argument("-l1", "--l1_coef", type=str)
+argparser.add_argument("-l1", "--l1_coef", type=float)
 args = argparser.parse_args()
 
 print("Using device:", device)
@@ -110,6 +110,7 @@ cfg = LanguageModelSAERunnerConfig(
     wandb_project = "sae-transfer-learning",
     wandb_log_frequency = 30,
     eval_every_n_wandb_logs = 100,
+    run_name = f"L{args.layer}_{args.component}_L1_{args.l1_coef.replace('.', '_')}",
 
     # Misc
     resume = False,
