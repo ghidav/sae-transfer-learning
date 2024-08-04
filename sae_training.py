@@ -3,6 +3,7 @@ import os
 
 from sae_lens.config import LanguageModelSAERunnerConfig
 from sae_lens import SAETrainingRunner
+import argparse
 
 if torch.cuda.is_available():
     device = "cuda"
@@ -11,16 +12,22 @@ elif torch.backends.mps.is_available():
 else:
     device = "cpu"
 
+argparser = argparse.ArgumentParser()
+argparser.add_argument("-l", "--layer", type=int)
+argparser.add_argument("-c", "--component", type=str)
+argparser.add_argument("-l1", "--l1_coef", type=str)
+args = argparser.parse_args()
+
 print("Using device:", device)
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ['HF_HOME'] = '/workspace/huggingface'
 
 training_tokens = 1_000_000_000
-batch_size = 2048
+batch_size = 4096
 
 total_training_steps = training_tokens // batch_size
 
-component = "hook_resid_post"
+component = "hook_mlp_out"
 
 lr_warm_up_steps = 0
 lr_decay_steps = total_training_steps // 5  # 20% of training
@@ -30,15 +37,15 @@ cfg = LanguageModelSAERunnerConfig(
     
     # Data Generating Function (Model + Training Distibuion)
     model_name = "EleutherAI/pythia-70m-deduped",
-    hook_name = f"blocks.0.{component}",
-    hook_layer = 0,
+    hook_name = f"blocks.{args.layer}.{args.component}",
+    hook_layer = {args.layer},
     dataset_path = "NeelNanda/pile-small-tokenized-2b",
     is_dataset_tokenized = True,
     context_size = 1024,
     streaming=True,
 
     # SAE Parameters
-    architecture = "standard",
+    architecture = "jumprelu",
     d_in = 512,
     d_sae = None,
     b_dec_init_method = "zeros",
@@ -51,7 +58,7 @@ cfg = LanguageModelSAERunnerConfig(
     # Activation Store Parameters
     n_batches_in_buffer = 128,
     training_tokens = training_tokens,
-    store_batch_size_prompts = 8,
+    store_batch_size_prompts = 12,
     train_batch_size_tokens = batch_size,
     normalize_activations = (
         "none"  # none, expected_average_only_in (Anthropic April Update), constant_norm_rescale (Anthropic Feb Update)
@@ -71,7 +78,7 @@ cfg = LanguageModelSAERunnerConfig(
 
     ## Loss Function
     mse_loss_normalization = None,
-    l1_coefficient = 1,
+    l1_coefficient = {args.l1_coef},
     lp_norm = 1,
     scale_sparsity_penalty_by_decoder_norm = False,
     l1_warm_up_steps = l1_warm_up_steps,
