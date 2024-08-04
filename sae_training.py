@@ -27,8 +27,6 @@ batch_size = 4096
 
 total_training_steps = training_tokens // batch_size
 
-component = "hook_mlp_out"
-
 lr_warm_up_steps = 0
 lr_decay_steps = total_training_steps // 5  # 20% of training
 l1_warm_up_steps = total_training_steps // 20  # 5% of training
@@ -36,7 +34,7 @@ l1_warm_up_steps = total_training_steps // 20  # 5% of training
 cfg = LanguageModelSAERunnerConfig(
     
     # Data Generating Function (Model + Training Distibuion)
-    model_name = "pythia-160m",
+    model_name = "pythia-160m-deduped",
     hook_name = f"blocks.{args.layer}.{args.component}",
     hook_layer = args.layer,
     dataset_path = "NeelNanda/pile-small-tokenized-2b",
