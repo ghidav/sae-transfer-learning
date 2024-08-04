@@ -38,7 +38,7 @@ cfg = LanguageModelSAERunnerConfig(
     # Data Generating Function (Model + Training Distibuion)
     model_name = "EleutherAI/pythia-70m-deduped",
     hook_name = f"blocks.{args.layer}.{args.component}",
-    hook_layer = {args.layer},
+    hook_layer = args.layer,
     dataset_path = "NeelNanda/pile-small-tokenized-2b",
     is_dataset_tokenized = True,
     context_size = 1024,
@@ -78,7 +78,7 @@ cfg = LanguageModelSAERunnerConfig(
 
     ## Loss Function
     mse_loss_normalization = None,
-    l1_coefficient = {args.l1_coef},
+    l1_coefficient = args.l1_coef,
     lp_norm = 1,
     scale_sparsity_penalty_by_decoder_norm = False,
     l1_warm_up_steps = l1_warm_up_steps,
