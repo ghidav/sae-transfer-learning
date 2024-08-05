@@ -70,18 +70,23 @@ eval_cfg = EvalConfig(
     compute_variance_metrics = False,
 )
 
-def update_cfg(act_layer, act_component):
+def update_cfg(act_layer, hook_name):
     default_cfg.hook_layer = act_layer
-    default_cfg.hook_name = f"blocks.{act_layer}.{act_component}"
+    default_cfg.hook_name = f"blocks.{act_layer}.{hook_name}"
     return default_cfg
 
 # Load SAE
 if args.component == "RES":
     component = "rs-post"
+    hook_name = "hook_resid_post"
 elif args.component == "MLP":
     component = "mlp-out"
+    hook_name = "hook_mlp_out"
 elif args.component == "ATT":
     component = "attn-z"
+    hook_name = "attn.hook_z"
+else:
+    raise ValueError("Invalid component.")
 
 # Load model
 model = HookedSAETransformer.from_pretrained("pythia-160m-deduped").to(device)
@@ -91,7 +96,7 @@ all_metrics = []
 
 for i in tqdm(range(layers)):
     # Set activation store
-    cfg = update_cfg(i, component)
+    cfg = update_cfg(i, hook_name)
     activations_store = ActivationsStore.from_config(
         model,
         cfg
@@ -99,14 +104,15 @@ for i in tqdm(range(layers)):
     for j in range(layers):
         try:
             # Load SAE
-            SAE_PATH = f"/workspace/huggingface/hub/models--mech-interp--pythia-160m-deduped-{component}/snapshots/3b8e8bffff1cf13322769107ecf50ceb23c406ee/L{j}"
+            SAE_PATH = f"/workspace/huggingface/hub/models--mech-interp--pythia-160m-deduped-{component}/snapshots/cd6d31fe37e24f5fa6fe75310fb4e21f07aa58de/L{j}"
             sae = SAE.load_from_pretrained(SAE_PATH).to(device)
 
             metrics = run_evals(sae, activations_store, model, eval_cfg)
             metrics = {k.split('/')[-1]: v for k, v in metrics.items()}
+            print(f"L{j} SAE on L{i} activations. C/E: {metrics['ce_loss_score']:.3f}")
             all_metrics.append(pd.Series(metrics, name=f"{i}-{j}"))
-        except:
-            print(f"Failed to load L{j} SAE.")
+        except Exception as e:
+            print(f"Failed to load L{j} SAE.", e)
             continue
 
 all_metrics = pd.concat(all_metrics, axis=1).T
