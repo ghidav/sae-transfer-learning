@@ -104,7 +104,7 @@ for i in tqdm(range(layers)):
     for j in range(layers):
         try:
             # Load SAE
-            SAE_PATH = f"/workspace/huggingface/hub/models--mech-interp--pythia-160m-deduped-{component}/snapshots/cd6d31fe37e24f5fa6fe75310fb4e21f07aa58de/L{j}"
+            SAE_PATH = f"checkpoints/L{j}"
             sae = SAE.load_from_pretrained(SAE_PATH).to(device)
 
             metrics = run_evals(sae, activations_store, model, eval_cfg)
