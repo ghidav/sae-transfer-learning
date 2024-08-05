@@ -40,7 +40,7 @@ cfg = LanguageModelSAERunnerConfig(
     dataset_path = "NeelNanda/pile-small-tokenized-2b",
     is_dataset_tokenized = True,
     context_size = 1024,
-    streaming=False,
+    streaming=True,
 
     # SAE Parameters
     architecture = "jumprelu",
