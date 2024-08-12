@@ -5,3 +5,4 @@ sae_lens.zip
 wandb/
 .ipynb_checkpoints/
 ./checkpoints/
+.venv
