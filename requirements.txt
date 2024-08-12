@@ -1,3 +1,8 @@
 sae_lens
 tqdm
 pandas
+ipykernel
+plotly
+seaborn
+matplotlib
+nbformat>=4.2.0
