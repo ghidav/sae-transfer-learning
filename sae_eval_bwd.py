@@ -1,4 +1,6 @@
 import argparse
+import json
+import os
 
 import pandas as pd
 import torch
@@ -84,26 +86,49 @@ else:
 # Load model
 model = HookedSAETransformer.from_pretrained("pythia-160m-deduped").to(device)
 
-layers = model.cfg.n_layers
-all_metrics = []
+# Create checkpoint mapping
+direction = "backward"
+ckpt_folder = f"/root/sae-transfer-learning/checkpoints/{direction}_TL"
+ckpt_step = "final_500002816"
+mapping = {}
+for _dir in os.listdir(ckpt_folder):
+    try:
+        cfg = json.load(open(os.path.join(ckpt_folder, _dir, ckpt_step, "cfg.json")))
+        mapping[_dir] = f"L{cfg['hook_name'].split('.')[1]}"
+    except FileNotFoundError:
+        continue
+inv_mapping = {v: k for k, v in mapping.items()}
 
-for i in tqdm(range(layers)):
-    # Set activation store
-    cfg = update_cfg(i, hook_name)
-    activations_store = ActivationsStore.from_config(model, cfg)
-    for j in range(layers):
-        try:
-            # Load SAE
-            SAE_PATH = f"checkpoints/L{j}"
-            sae = SAE.load_from_pretrained(SAE_PATH).to(device)
+# Load model
+model = HookedSAETransformer.from_pretrained("pythia-160m-deduped").to(device)
+checkpoints = ["100003840", "200003584", "300003328", "400003072", "final_500002816"]
 
-            metrics = run_evals(sae, activations_store, model, eval_cfg)
-            metrics = {k.split("/")[-1]: v for k, v in metrics.items()}
-            print(f"L{j} SAE on L{i} activations. C/E: {metrics['ce_loss_score']:.3f}")
-            all_metrics.append(pd.Series(metrics, name=f"{i}-{j}"))
-        except Exception as e:
-            print(f"Failed to load L{j} SAE.", e)
-            continue
+start_layer = 1
+end_layer = model.cfg.n_layers
 
-all_metrics = pd.concat(all_metrics, axis=1).T
-all_metrics.to_csv(f"eval/{component}_all.csv")
+direction = "backward"
+ckpt_folder = f"/root/sae-transfer-learning/checkpoints/{direction}_TL"
+
+for ckpt_step in checkpoints:
+    print(f"Checkpoint: {ckpt_step}")
+    all_transfer_metrics = []
+    for sae_idx in tqdm(range(start_layer, end_layer)):
+        # Set activation store
+        for act_idx in range(model.cfg.n_layers):
+            cfg = update_cfg(act_idx, hook_name)
+            activations_store = ActivationsStore.from_config(model, cfg)
+            try:
+                # Load SAE
+                TRANSFER_SAE_PATH = os.path.join(ckpt_folder, inv_mapping[f"L{sae_idx-1}"], ckpt_step)
+                sae = SAE.load_from_pretrained(TRANSFER_SAE_PATH).to(device)
+
+                metrics = run_evals(sae, activations_store, model, eval_cfg)
+                metrics = {k.split("/")[-1]: v for k, v in metrics.items()}
+                print(f"L{sae_idx} SAE on L{act_idx} activations. C/E: {metrics['ce_loss_score']:.3f}")
+                all_transfer_metrics.append(pd.Series(metrics, name=f"{act_idx}-{sae_idx}"))
+            except Exception as e:
+                print(f"Failed to load L{sae_idx} SAE.", e)
+                continue
+
+    all_transfer_metrics = pd.concat(all_transfer_metrics, axis=1).T
+    all_transfer_metrics.to_csv(f"eval/{component}_transfer_backward_{ckpt_step}_all.csv")
