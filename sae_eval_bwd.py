@@ -84,9 +84,6 @@ elif args.component == "ATT":
 else:
     raise ValueError("Invalid component.")
 
-# Load model
-model = HookedSAETransformer.from_pretrained("pythia-160m-deduped").to(device)
-
 # Create checkpoint mapping
 direction = "backward"
 ckpt_folder = f"/root/sae-transfer-learning/checkpoints/{direction}_TL"

@@ -1,3 +1,11 @@
+import urllib3, socket
+from urllib3.connection import HTTPConnection
+
+HTTPConnection.default_socket_options = HTTPConnection.default_socket_options + [
+    (socket.SOL_SOCKET, socket.SO_SNDBUF, 2000000),
+    (socket.SOL_SOCKET, socket.SO_RCVBUF, 2000000),
+]
+
 import argparse
 import json
 import os
@@ -83,9 +91,6 @@ elif args.component == "ATT":
     hook_name = "attn.hook_z"
 else:
     raise ValueError("Invalid component.")
-
-# Load model
-model = HookedSAETransformer.from_pretrained("pythia-160m-deduped").to(device)
 
 # Create checkpoint mapping
 direction = "forward"
