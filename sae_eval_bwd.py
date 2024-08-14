@@ -1,4 +1,6 @@
-import urllib3, socket
+import socket
+
+import urllib3
 from urllib3.connection import HTTPConnection
 
 HTTPConnection.default_socket_options = HTTPConnection.default_socket_options + [
@@ -12,7 +14,7 @@ import os
 
 import pandas as pd
 import torch
-from huggingface_hub import load_dataset
+from datasets import load_dataset
 from sae_lens import SAE, ActivationsStore, HookedSAETransformer
 from sae_lens.config import LanguageModelSAERunnerConfig
 from sae_lens.evals import EvalConfig, run_evals
