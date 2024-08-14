@@ -1,9 +1,18 @@
+import urllib3, socket
+from urllib3.connection import HTTPConnection
+
+HTTPConnection.default_socket_options = HTTPConnection.default_socket_options + [
+    (socket.SOL_SOCKET, socket.SO_SNDBUF, 2000000),
+    (socket.SOL_SOCKET, socket.SO_RCVBUF, 2000000),
+]
+
 import argparse
 import json
 import os
 
 import pandas as pd
 import torch
+from huggingface_hub import load_dataset
 from sae_lens import SAE, ActivationsStore, HookedSAETransformer
 from sae_lens.config import LanguageModelSAERunnerConfig
 from sae_lens.evals import EvalConfig, run_evals
@@ -60,7 +69,7 @@ eval_cfg = EvalConfig(
     n_eval_sparsity_variance_batches=1,
     compute_l2_norms=True,
     compute_sparsity_metrics=True,
-    compute_variance_metrics=False,
+    compute_variance_metrics=True,
 )
 
 
@@ -82,9 +91,6 @@ elif args.component == "ATT":
     hook_name = "attn.hook_z"
 else:
     raise ValueError("Invalid component.")
-
-# Load model
-model = HookedSAETransformer.from_pretrained("pythia-160m-deduped").to(device)
 
 # Create checkpoint mapping
 direction = "backward"
@@ -109,19 +115,20 @@ end_layer = model.cfg.n_layers
 direction = "backward"
 ckpt_folder = f"/root/sae-transfer-learning/checkpoints/{direction}_TL"
 
+dataset = load_dataset("NeelNanda/pile-small-tokenized-2b", streaming=True, split="train")
+
 for ckpt_step in checkpoints:
     print(f"Checkpoint: {ckpt_step}")
     all_transfer_metrics = []
     for sae_idx in tqdm(range(start_layer, end_layer)):
-        # Set activation store
+        # Load SAE
+        TRANSFER_SAE_PATH = os.path.join(ckpt_folder, inv_mapping[f"L{sae_idx-1}"], ckpt_step)
+        sae = SAE.load_from_pretrained(TRANSFER_SAE_PATH).to(device)
         for act_idx in range(model.cfg.n_layers):
+            # Set activation store
             cfg = update_cfg(act_idx, hook_name)
             activations_store = ActivationsStore.from_config(model, cfg)
             try:
-                # Load SAE
-                TRANSFER_SAE_PATH = os.path.join(ckpt_folder, inv_mapping[f"L{sae_idx-1}"], ckpt_step)
-                sae = SAE.load_from_pretrained(TRANSFER_SAE_PATH).to(device)
-
                 metrics = run_evals(sae, activations_store, model, eval_cfg)
                 metrics = {k.split("/")[-1]: v for k, v in metrics.items()}
                 print(f"L{sae_idx} SAE on L{act_idx} activations. C/E: {metrics['ce_loss_score']:.3f}")
@@ -129,6 +136,5 @@ for ckpt_step in checkpoints:
             except Exception as e:
                 print(f"Failed to load L{sae_idx} SAE.", e)
                 continue
-
     all_transfer_metrics = pd.concat(all_transfer_metrics, axis=1).T
-    all_transfer_metrics.to_csv(f"eval/{component}_transfer_backward_{ckpt_step}_all.csv")
+    all_transfer_metrics.to_csv(f"eval/{component}_transfer_backward_{ckpt_step}_all_mse.csv")
