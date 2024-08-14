@@ -58,7 +58,7 @@ eval_cfg = EvalConfig(
     n_eval_sparsity_variance_batches=1,
     compute_l2_norms=True,
     compute_sparsity_metrics=True,
-    compute_variance_metrics=False,
+    compute_variance_metrics=True,
 )
 
 
