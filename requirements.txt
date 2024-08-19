@@ -6,3 +6,4 @@ plotly
 seaborn
 matplotlib
 nbformat>=4.2.0
+sae-vis
