@@ -122,15 +122,15 @@ dataset = load_dataset("NeelNanda/pile-small-tokenized-2b", streaming=True, spli
 for ckpt_step in checkpoints:
     print(f"Checkpoint: {ckpt_step}")
     all_transfer_metrics = []
-    for sae_idx in tqdm(range(start_layer, end_layer)):
-        # Load SAE
-        TRANSFER_SAE_PATH = os.path.join(ckpt_folder, inv_mapping[f"L{sae_idx-1}"], ckpt_step)
-        sae = SAE.load_from_pretrained(TRANSFER_SAE_PATH).to(device)
-        for act_idx in range(model.cfg.n_layers):
-            # Set activation store
-            cfg = update_cfg(act_idx, hook_name)
-            activations_store = ActivationsStore.from_config(model, cfg)
+    for act_idx in range(model.cfg.n_layers):
+        # Set activation store
+        cfg = update_cfg(act_idx, hook_name)
+        activations_store = ActivationsStore.from_config(model, cfg)
+        for sae_idx in tqdm(range(start_layer, end_layer)):
             try:
+                # Load SAE
+                TRANSFER_SAE_PATH = os.path.join(ckpt_folder, inv_mapping[f"L{sae_idx-1}"], ckpt_step)
+                sae = SAE.load_from_pretrained(TRANSFER_SAE_PATH).to(device)
                 metrics = run_evals(sae, activations_store, model, eval_cfg)
                 metrics = {k.split("/")[-1]: v for k, v in metrics.items()}
                 print(f"L{sae_idx} SAE on L{act_idx} activations. C/E: {metrics['ce_loss_score']:.3f}")
