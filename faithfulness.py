@@ -128,7 +128,7 @@ def faithfulness(
         device=device,
     )
 
-    return (C.mean().item() - zero.mean().item()) / (M - zero.mean().item()), N
+    return (C.mean().item() - zero.mean().item()) / (M - zero.mean().item() + 1e-7), N
 
 
 ##########
@@ -197,7 +197,7 @@ scores = []
 Ns = []
 
 # for T in tqdm(np.exp(np.linspace(-10, np.log(100), 64))):
-for T in tqdm([128, 245, 368, 512]):
+for T in tqdm([123, 246, 368, 492]):
 # for T in tqdm([1024]):
     score, N = faithfulness(
         test_tokens,

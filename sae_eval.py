@@ -91,7 +91,8 @@ with torch.no_grad():
     for i in tqdm(range(layers)):
         # Set activation store
         cfg = update_cfg(i, hook_name)
-        for j in range(max(0, i-1), min(i+2, layers)):
+        # for j in range(max(0, i-1), min(i+2, layers)):
+        for j in range(layers):
             try:
                 # Load SAEn
                 SAE_PATH = f"saes/pythia-160m-deduped/baseline/L{j}/1B"
