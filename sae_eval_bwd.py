@@ -64,11 +64,11 @@ default_cfg = LanguageModelSAERunnerConfig(
 eval_cfg = EvalConfig(
     batch_size_prompts=8,
     # Reconstruction metrics
-    n_eval_reconstruction_batches=32,
+    n_eval_reconstruction_batches=128,
     compute_kl=True,
     compute_ce_loss=True,
     # Sparsity and variance metrics
-    n_eval_sparsity_variance_batches=1,
+    n_eval_sparsity_variance_batches=128,
     compute_l2_norms=True,
     compute_sparsity_metrics=True,
     compute_variance_metrics=True,
@@ -95,9 +95,8 @@ else:
     raise ValueError("Invalid component.")
 
 # Create checkpoint mapping
-direction = "backward"
-ckpt_folder = f"/root/sae-transfer-learning/checkpoints/{direction}_TL"
-ckpt_step = "final_500002816"
+ckpt_folder = "/root/sae-transfer-learning/saes/pythia-160m-deduped/backward"
+ckpt_step = "500M"
 mapping = {}
 for _dir in os.listdir(ckpt_folder):
     try:
@@ -109,34 +108,35 @@ inv_mapping = {v: k for k, v in mapping.items()}
 
 # Load model
 model = HookedSAETransformer.from_pretrained("pythia-160m-deduped").to(device)
-checkpoints = ["100003840", "200003584", "300003328", "400003072", "final_500002816"]
+checkpoints = ["100M", "200M", "300M", "400M", "500M"]
 
 start_layer = 1
 end_layer = model.cfg.n_layers
 
 direction = "backward"
-ckpt_folder = f"/root/sae-transfer-learning/checkpoints/{direction}_TL"
+ckpt_folder = "/root/sae-transfer-learning/saes/pythia-160m-deduped/backward"
 
 dataset = load_dataset("NeelNanda/pile-small-tokenized-2b", streaming=True, split="train")
 
 for ckpt_step in checkpoints:
     print(f"Checkpoint: {ckpt_step}")
     all_transfer_metrics = []
-    for act_idx in range(model.cfg.n_layers):
+    for sae_idx in tqdm(range(start_layer, end_layer)):
         # Set activation store
-        cfg = update_cfg(act_idx, hook_name)
+        cfg = update_cfg(sae_idx, hook_name)
         activations_store = ActivationsStore.from_config(model, cfg)
-        for sae_idx in tqdm(range(start_layer, end_layer)):
-            try:
-                # Load SAE
-                TRANSFER_SAE_PATH = os.path.join(ckpt_folder, inv_mapping[f"L{sae_idx-1}"], ckpt_step)
-                sae = SAE.load_from_pretrained(TRANSFER_SAE_PATH).to(device)
-                metrics = run_evals(sae, activations_store, model, eval_cfg)
-                metrics = {k.split("/")[-1]: v for k, v in metrics.items()}
-                print(f"L{sae_idx} SAE on L{act_idx} activations. C/E: {metrics['ce_loss_score']:.3f}")
-                all_transfer_metrics.append(pd.Series(metrics, name=f"{act_idx}-{sae_idx}"))
-            except Exception as e:
-                print(f"Failed to load L{sae_idx} SAE.", e)
-                continue
+        try:
+            # Load SAE
+            TRANSFER_SAE_PATH = os.path.join(ckpt_folder, inv_mapping[f"L{sae_idx-1}"], ckpt_step)
+            sae = SAE.load_from_pretrained(TRANSFER_SAE_PATH).to(device)
+            sae.cfg.hook_name = f"blocks.{sae_idx-1}.{hook_name}"
+            sae.cfg.hook_layer = sae_idx - 1
+            metrics = run_evals(sae, activations_store, model, eval_cfg)
+            metrics = {k.split("/")[-1]: v for k, v in metrics.items()}
+            print(f"L{sae_idx} SAE on L{sae_idx-1} activations. C/E: {metrics['ce_loss_score']:.3f}")
+            all_transfer_metrics.append(pd.Series(metrics, name=f"{sae_idx-1}-{sae_idx}"))
+        except Exception as e:
+            print(f"Failed to load L{sae_idx} SAE.", e)
+            continue
     all_transfer_metrics = pd.concat(all_transfer_metrics, axis=1).T
     all_transfer_metrics.to_csv(f"eval/{component}_transfer_backward_{ckpt_step}_all_mse.csv")

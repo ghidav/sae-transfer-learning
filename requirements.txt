@@ -1,4 +1,4 @@
-sae_lens
+sae_lens==3.14.0
 tqdm
 pandas
 ipykernel
@@ -7,3 +7,4 @@ seaborn
 matplotlib
 nbformat>=4.2.0
 sae-vis
+huggingface-hub==0.24.0

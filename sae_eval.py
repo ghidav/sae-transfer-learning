@@ -40,7 +40,7 @@ default_cfg = LanguageModelSAERunnerConfig(
     from_pretrained_path=None,
     apply_b_dec_to_input=False,
     # Activation Store Parameters
-    n_batches_in_buffer=128,
+    n_batches_in_buffer=16,
     # Misc
     device=device,
     seed=42,
@@ -51,11 +51,11 @@ default_cfg = LanguageModelSAERunnerConfig(
 eval_cfg = EvalConfig(
     batch_size_prompts=8,
     # Reconstruction metrics
-    n_eval_reconstruction_batches=32,
+    n_eval_reconstruction_batches=128,
     compute_kl=True,
     compute_ce_loss=True,
     # Sparsity and variance metrics
-    n_eval_sparsity_variance_batches=1,
+    n_eval_sparsity_variance_batches=128,
     compute_l2_norms=True,
     compute_sparsity_metrics=True,
     compute_variance_metrics=True,
@@ -87,23 +87,26 @@ model = HookedSAETransformer.from_pretrained("pythia-160m-deduped").to(device)
 layers = model.cfg.n_layers
 all_metrics = []
 
-for i in tqdm(range(layers)):
-    # Set activation store
-    cfg = update_cfg(i, hook_name)
-    activations_store = ActivationsStore.from_config(model, cfg)
-    for j in range(layers):
-        try:
-            # Load SAE
-            SAE_PATH = f"checkpoints/L{j}"
-            sae = SAE.load_from_pretrained(SAE_PATH).to(device)
+with torch.no_grad():
+    for i in tqdm(range(layers)):
+        # Set activation store
+        cfg = update_cfg(i, hook_name)
+        for j in range(max(0, i-1), min(i+2, layers)):
+            try:
+                # Load SAEn
+                SAE_PATH = f"saes/pythia-160m-deduped/baseline/L{j}/1B"
+                sae = SAE.load_from_pretrained(SAE_PATH).to(device)
+                sae.cfg.hook_name = f"blocks.{i}.{hook_name}"
+                sae.cfg.hook_layer = j
+                activations_store = ActivationsStore.from_config(model, cfg)
 
-            metrics = run_evals(sae, activations_store, model, eval_cfg)
-            metrics = {k.split("/")[-1]: v for k, v in metrics.items()}
-            print(f"L{j} SAE on L{i} activations. C/E: {metrics['ce_loss_score']:.3f}")
-            all_metrics.append(pd.Series(metrics, name=f"{i}-{j}"))
-        except Exception as e:
-            print(f"Failed to load L{j} SAE.", e)
-            continue
+                metrics = run_evals(sae, activations_store, model, eval_cfg)
+                metrics = {k.split("/")[-1]: v for k, v in metrics.items()}
+                print(f"L{j} SAE on L{i} activations. C/E: {metrics['ce_loss_score']:.3f}")
+                all_metrics.append(pd.Series(metrics, name=f"{i}-{j}"))
+            except Exception as e:
+                print(f"Failed to load L{j} SAE.", e)
+                continue
 
 all_metrics = pd.concat(all_metrics, axis=1).T
 all_metrics.to_csv(f"eval/{component}_all.csv")
