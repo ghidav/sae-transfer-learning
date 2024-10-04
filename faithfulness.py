@@ -12,7 +12,7 @@ from hooks import sae_features_hook, sae_hook
 import os
 
 parser = argparse.ArgumentParser()
-parser.add_argument("-k", "--K", type=int, default=-1)
+parser.add_argument("-K", "--K", nargs="+", default=[123, 246, 368, 492])
 parser.add_argument("-c", "--component", type=str, default="resid_post")
 parser.add_argument("-n", "--n", type=int, default=1024)
 parser.add_argument("-m", "--method", type=str, default="attrib")
@@ -135,7 +135,9 @@ def faithfulness(
 ## Main ##
 ##########
 
+print(args)
 task = args.task
+args.K = [int(k) for k in args.K]
 model = HookedTransformer.from_pretrained("pythia-160m-deduped", device="cuda")
 modules = [get_act_name(args.component, args.layer)]
 lengths = {"ioi": 15, "greater_than": 12, "subject_verb": 6}
@@ -197,8 +199,8 @@ scores = []
 Ns = []
 
 # for T in tqdm(np.exp(np.linspace(-10, np.log(100), 64))):
-for T in tqdm([123, 246, 368, 492]):
-# for T in tqdm([1024]):
+for T in tqdm(args.K):
+    # for T in tqdm([1024]):
     score, N = faithfulness(
         test_tokens,
         clean_answers,
@@ -214,6 +216,6 @@ for T in tqdm([123, 246, 368, 492]):
 
 score_df = pd.DataFrame({"score": scores, "N": Ns})
 score_df.to_csv(
-    f"faithfulness/{args.direction}_{task}_{args.method}_{args.component}_{args.what}_L{args.layer}_{args.ckpt}.csv",
+    f"faithfulness/{args.direction}_{task}_{args.method}_{args.component}_{args.what}_L{args.layer}_{args.ckpt}_K_{'_'.join(str(int(s)) for s in args.K)}.csv",
     index=False,
 )
