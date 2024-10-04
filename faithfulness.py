@@ -14,11 +14,11 @@ import os
 parser = argparse.ArgumentParser()
 parser.add_argument("-k", "--K", type=int, default=-1)
 parser.add_argument("-c", "--component", type=str, default="resid_post")
-parser.add_argument("-n", "--n", type=int, default=128)
+parser.add_argument("-n", "--n", type=int, default=1024)
 parser.add_argument("-m", "--method", type=str, default="attrib")
 parser.add_argument("-w", "--what", type=str, default="faithfulness")
 parser.add_argument("-d", "--direction", type=str, default="baseline")
-parser.add_argument("--layer", type=int, default=0)
+parser.add_argument("--layer", type=int, default=10)
 parser.add_argument("--task", type=str, default="ioi")
 parser.add_argument("--ckpt", type=str, default="1B")
 args = parser.parse_args()
@@ -187,7 +187,7 @@ with torch.no_grad():
 feature_avg = {k: v.mean(0) for k, v in feature_cache.items()}
 
 effects = torch.load(f"effects/{task}_n{n}_{args.method}_{args.direction}_L{args.layer}_{args.ckpt}.pt")["nodes"]
-effects = {k: v for k, v in effects.items() if str(model.cfg.n_layers - 1) not in k}
+# effects = {k: v for k, v in effects.items() if str(model.cfg.n_layers - 1) not in k}
 
 test_tokens = torch.cat([e["clean_prefix"] for e in test_examples])
 clean_answers = torch.tensor([e["clean_answer"] for e in test_examples])

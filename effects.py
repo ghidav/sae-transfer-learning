@@ -175,14 +175,14 @@ if __name__ == "__main__":
         "--num_examples",
         "-n",
         type=int,
-        default=192,
+        default=1024,
         help="The number of examples from the --dataset over which to average indirect effects.",
     )
     parser.add_argument(
         "--example_length",
         "-l",
         type=int,
-        default=None,
+        default=15,
         help="The max length (if using sum aggregation) or exact length (if not aggregating) of examples.",
     )
     parser.add_argument(
